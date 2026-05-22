@@ -299,35 +299,60 @@ fn build_auto_handoff(
     cwd: Option<String>,
     observations: &[ai_memory_core::Observation],
 ) -> NewHandoff {
-    let mut prompts: Vec<&str> = Vec::new();
+    // Prefer obs.body (the full prompt) over obs.title (first-line +
+    // truncated to 80 chars for log/list display). When body is
+    // empty fall back to title so we never produce an empty entry.
+    fn pick_text(obs: &ai_memory_core::Observation) -> &str {
+        if !obs.body.is_empty() {
+            obs.body.as_str()
+        } else {
+            obs.title.as_str()
+        }
+    }
+    /// Cap so a single 10-page prompt doesn't blow up the handoff.
+    /// The body is already scrubbed at insert time; this is just a
+    /// length budget. 1500 chars ≈ 250 words ≈ a paragraph.
+    fn cap(s: &str) -> String {
+        const MAX: usize = 1500;
+        if s.chars().count() <= MAX {
+            s.to_string()
+        } else {
+            let truncated: String = s.chars().take(MAX).collect();
+            format!("{truncated}…")
+        }
+    }
+    let mut prompts: Vec<String> = Vec::new();
     let mut tools: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for obs in observations {
         match obs.kind {
-            ObservationKind::UserPrompt if !obs.title.is_empty() => prompts.push(&obs.title),
+            ObservationKind::UserPrompt => {
+                let text = pick_text(obs);
+                if !text.is_empty() {
+                    prompts.push(text.to_string());
+                }
+            }
             ObservationKind::PostToolUse | ObservationKind::PreToolUse if !obs.title.is_empty() => {
-                tools.insert(&obs.title);
+                tools.insert(obs.title.as_str());
             }
             _ => {}
         }
     }
-    let last_prompt = prompts.last().copied();
-    let summary = match (prompts.first().copied(), last_prompt) {
-        (Some(first), Some(last)) if first == last => format!("Session focused on: {first}"),
-        (Some(first), Some(last)) => format!("Started: {first}. Last: {last}."),
-        (Some(first), None) => format!("Started: {first}."),
+    let first_prompt = prompts.first().cloned();
+    let last_prompt = prompts.last().cloned();
+    let summary = match (&first_prompt, &last_prompt) {
+        (Some(first), Some(last)) if first == last => format!("Session focused on: {}", cap(first)),
+        (Some(first), Some(last)) => format!("Started: {}\n\nLast: {}", cap(first), cap(last),),
+        (Some(first), None) => format!("Started: {}", cap(first)),
         _ => format!(
             "Session ended; {} observations recorded.",
             observations.len()
         ),
     };
-    let open_questions = if prompts.is_empty() {
-        Vec::new()
-    } else {
+    let open_questions = if let Some(last) = last_prompt {
         // Heuristic: last user prompt often *is* the open question.
-        vec![format!(
-            "Continue from: {}",
-            last_prompt.unwrap_or_default()
-        )]
+        vec![format!("Continue from: {}", cap(&last))]
+    } else {
+        Vec::new()
     };
     let next_steps = if tools.is_empty() {
         Vec::new()
