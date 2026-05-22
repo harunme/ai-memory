@@ -47,6 +47,8 @@ pub enum Command {
     Restore(RestoreArgs),
     /// Print (or apply) lifecycle-hook configuration for an agent CLI.
     InstallHooks(InstallHooksArgs),
+    /// Stage + commit the wiki tree under git.
+    Commit(CommitArgs),
 }
 
 /// Arguments for `init`.
@@ -125,6 +127,14 @@ pub enum AgentChoice {
     Codex,
     /// OpenCode (open-source coding agent).
     OpenCode,
+}
+
+/// Arguments for `commit`.
+#[derive(Debug, Args)]
+pub struct CommitArgs {
+    /// Commit message.
+    #[arg(long, short = 'm', default_value = "manual commit")]
+    pub message: String,
 }
 
 /// Arguments for `install-hooks`.

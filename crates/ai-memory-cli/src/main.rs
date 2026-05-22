@@ -47,5 +47,6 @@ async fn main() -> Result<()> {
         Command::Backup(args) => commands::backup::run(&config, args).await,
         Command::Restore(args) => commands::restore::run(&config, args),
         Command::InstallHooks(args) => commands::install_hooks::run(&config, args),
+        Command::Commit(args) => commands::commit::run(&config, args),
     }
 }

@@ -1,6 +1,7 @@
 //! Subcommand implementations.
 
 pub mod backup;
+pub mod commit;
 pub mod init;
 pub mod install_hooks;
 pub mod reset;

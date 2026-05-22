@@ -7,6 +7,7 @@ use ai_memory_store::WriterHandle;
 
 use crate::atomic;
 use crate::error::WikiResult;
+use crate::git::GitAdapter;
 use crate::markdown::{Markdown, derive_title, emit, parse};
 
 /// Wiki filesystem handle.
@@ -20,18 +21,36 @@ use crate::markdown::{Markdown, derive_title, emit, parse};
 pub struct Wiki {
     root: PathBuf,
     writer: WriterHandle,
+    git: GitAdapter,
 }
 
 impl Wiki {
     /// Construct a wiki handle rooted at `<data_dir>/wiki/`. Creates the
-    /// directory if absent.
+    /// directory if absent and initialises a git repo inside it.
     ///
     /// # Errors
-    /// Returns [`WikiError::Io`] if the wiki root cannot be created.
+    /// Returns [`WikiError::Io`] if the wiki root or git repo cannot be
+    /// created.
     pub fn new(data_dir: &Path, writer: WriterHandle) -> WikiResult<Self> {
         let root = data_dir.join("wiki");
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root, writer })
+        let git = GitAdapter::open_or_init(&root)?;
+        Ok(Self { root, writer, git })
+    }
+
+    /// Borrow the git adapter (for callers wiring auto-commit).
+    #[must_use]
+    pub fn git(&self) -> &GitAdapter {
+        &self.git
+    }
+
+    /// Stage + commit the entire wiki tree. Returns `Ok(None)` if there
+    /// was nothing to commit.
+    ///
+    /// # Errors
+    /// Propagates [`WikiError`] from the git adapter.
+    pub fn commit_all(&self, message: &str) -> WikiResult<Option<git2::Oid>> {
+        self.git.commit_all(message)
     }
 
     /// Path of the wiki root on disk.

@@ -23,7 +23,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use jiff::Timestamp;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::log;
@@ -144,6 +144,18 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
         let handoff =
             build_auto_handoff(state, env.agent, session_id, env.cwd.clone(), &observations);
         let handoff_id = state.writer.insert_handoff(handoff).await?;
+        // Auto-commit the wiki tree so the session/handoff/log.md
+        // changes land in git in one atomic snapshot.
+        let commit_msg = format!(
+            "session {}: {}",
+            short_id(&session_id.to_string()),
+            new_page.title.chars().take(60).collect::<String>(),
+        );
+        match state.wiki.commit_all(&commit_msg) {
+            Ok(Some(oid)) => debug!(commit = %oid, "wiki auto-commit"),
+            Ok(None) => debug!("wiki clean; no auto-commit"),
+            Err(e) => warn!(error = %e, "auto-commit failed"),
+        }
         info!(
             session = %session_id,
             page = %new_page.path,
@@ -229,6 +241,10 @@ fn build_auto_handoff(
         next_steps,
         files_touched: Vec::new(),
     }
+}
+
+fn short_id(s: &str) -> String {
+    s.chars().take(8).collect()
 }
 
 const fn importance_for(event: HookEvent) -> u8 {
