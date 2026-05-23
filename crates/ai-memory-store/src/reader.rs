@@ -147,6 +147,10 @@ pub struct PageMeta {
     pub workspace_name: String,
     /// Name of the project.
     pub project_name: String,
+    /// UUID of the workspace — used to construct the per-project wiki path.
+    pub workspace_id: WorkspaceId,
+    /// UUID of the project — used to construct the per-project wiki path.
+    pub project_id: ProjectId,
     /// Relative wiki path.
     pub path: String,
     /// Page title.
@@ -324,26 +328,6 @@ impl ReaderPool {
                 out.push(r??);
             }
             Ok(out)
-        })
-        .await
-    }
-
-    /// True when any `is_latest = 1` page row anywhere in the store
-    /// still references the given wiki path. Used by purge-project to
-    /// avoid deleting a wiki file on disk when another project still
-    /// has a page row pointing at the same path (the wiki is flat on
-    /// disk, so paths can collide across projects).
-    ///
-    /// # Errors
-    /// Propagates any SQL or pool error.
-    pub async fn path_still_referenced(&self, path: String) -> StoreResult<bool> {
-        self.with_conn(move |conn| {
-            let n: i64 = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM pages WHERE path = ?1 AND is_latest = 1)",
-                params![path],
-                |row| row.get(0),
-            )?;
-            Ok(n != 0)
         })
         .await
     }
@@ -793,7 +777,7 @@ impl ReaderPool {
         self.with_conn(move |conn| {
             let row_opt = conn
                 .query_row(
-                    "SELECT w.name, p.name, pg.path, pg.title, \
+                    "SELECT w.name, p.name, w.id, p.id, pg.path, pg.title, \
                             COALESCE(json_extract(pg.frontmatter_json, '$.kind'), 'fact'), \
                             pg.tier, pg.pinned, pg.created_at, pg.updated_at, \
                             sp.path AS supersedes_path \
@@ -807,17 +791,21 @@ impl ReaderPool {
                     |row| {
                         let workspace_name: String = row.get(0)?;
                         let project_name: String = row.get(1)?;
-                        let path: String = row.get(2)?;
-                        let title: String = row.get(3)?;
-                        let kind: String = row.get(4)?;
-                        let tier: String = row.get(5)?;
-                        let pinned: i64 = row.get(6)?;
-                        let created_us: i64 = row.get(7)?;
-                        let updated_us: i64 = row.get(8)?;
-                        let supersedes_path: Option<String> = row.get(9)?;
+                        let ws_id_bytes: Vec<u8> = row.get(2)?;
+                        let proj_id_bytes: Vec<u8> = row.get(3)?;
+                        let path: String = row.get(4)?;
+                        let title: String = row.get(5)?;
+                        let kind: String = row.get(6)?;
+                        let tier: String = row.get(7)?;
+                        let pinned: i64 = row.get(8)?;
+                        let created_us: i64 = row.get(9)?;
+                        let updated_us: i64 = row.get(10)?;
+                        let supersedes_path: Option<String> = row.get(11)?;
                         Ok((
                             workspace_name,
                             project_name,
+                            ws_id_bytes,
+                            proj_id_bytes,
                             path,
                             title,
                             kind,
@@ -834,6 +822,8 @@ impl ReaderPool {
             let Some((
                 workspace_name,
                 project_name,
+                ws_id_bytes,
+                proj_id_bytes,
                 path,
                 title,
                 kind,
@@ -847,6 +837,11 @@ impl ReaderPool {
                 return Ok(None);
             };
 
+            let workspace_id = WorkspaceId::from_slice(&ws_id_bytes)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, 0))?;
+            let project_id = ProjectId::from_slice(&proj_id_bytes)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, 0))?;
+
             let created_at = jiff::Timestamp::from_microsecond(created_us)
                 .map(|ts| ts.to_string())
                 .unwrap_or_default();
@@ -857,6 +852,8 @@ impl ReaderPool {
             Ok(Some(PageMeta {
                 workspace_name,
                 project_name,
+                workspace_id,
+                project_id,
                 path,
                 title,
                 kind,
@@ -984,7 +981,7 @@ impl ReaderPool {
         self.with_conn(move |conn| {
             let row_opt = conn
                 .query_row(
-                    "SELECT w.name, p.name, pg.path, pg.title, \
+                    "SELECT w.name, p.name, w.id, p.id, pg.path, pg.title, \
                             COALESCE(json_extract(pg.frontmatter_json, '$.kind'), 'fact'), \
                             pg.tier, pg.pinned, pg.created_at, pg.updated_at, \
                             sp.path AS supersedes_path \
@@ -997,17 +994,21 @@ impl ReaderPool {
                     |row| {
                         let workspace_name: String = row.get(0)?;
                         let project_name: String = row.get(1)?;
-                        let path: String = row.get(2)?;
-                        let title: String = row.get(3)?;
-                        let kind: String = row.get(4)?;
-                        let tier: String = row.get(5)?;
-                        let pinned: i64 = row.get(6)?;
-                        let created_us: i64 = row.get(7)?;
-                        let updated_us: i64 = row.get(8)?;
-                        let supersedes_path: Option<String> = row.get(9)?;
+                        let ws_id_bytes: Vec<u8> = row.get(2)?;
+                        let proj_id_bytes: Vec<u8> = row.get(3)?;
+                        let path: String = row.get(4)?;
+                        let title: String = row.get(5)?;
+                        let kind: String = row.get(6)?;
+                        let tier: String = row.get(7)?;
+                        let pinned: i64 = row.get(8)?;
+                        let created_us: i64 = row.get(9)?;
+                        let updated_us: i64 = row.get(10)?;
+                        let supersedes_path: Option<String> = row.get(11)?;
                         Ok((
                             workspace_name,
                             project_name,
+                            ws_id_bytes,
+                            proj_id_bytes,
                             path,
                             title,
                             kind,
@@ -1024,6 +1025,8 @@ impl ReaderPool {
             let Some((
                 workspace_name,
                 project_name,
+                ws_id_bytes,
+                proj_id_bytes,
                 path,
                 title,
                 kind,
@@ -1037,6 +1040,11 @@ impl ReaderPool {
                 return Ok(None);
             };
 
+            let workspace_id = WorkspaceId::from_slice(&ws_id_bytes)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, 0))?;
+            let project_id = ProjectId::from_slice(&proj_id_bytes)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, 0))?;
+
             let created_at = jiff::Timestamp::from_microsecond(created_us)
                 .map(|ts| ts.to_string())
                 .unwrap_or_default();
@@ -1047,6 +1055,8 @@ impl ReaderPool {
             Ok(Some(PageMeta {
                 workspace_name,
                 project_name,
+                workspace_id,
+                project_id,
                 path,
                 title,
                 kind,

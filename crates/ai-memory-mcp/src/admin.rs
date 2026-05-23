@@ -29,9 +29,7 @@ use ai_memory_consolidate::{
 };
 use ai_memory_core::{PagePath, ProjectId, SessionId, Tier, WorkspaceId};
 use ai_memory_llm::{Embedder, LlmProvider};
-use ai_memory_store::{
-    DecayParams, PurgeSummary, ReaderPool, StoreError, WriterHandle, f32_vec_to_bytes,
-};
+use ai_memory_store::{DecayParams, ReaderPool, StoreError, WriterHandle, f32_vec_to_bytes};
 use ai_memory_wiki::{Wiki, WritePageRequest};
 use axum::Json;
 use axum::Router;
@@ -856,7 +854,7 @@ async fn handle_embed(
             would_embed += 1;
             continue;
         }
-        let md = match state.wiki.read_page(&cand.path) {
+        let md = match state.wiki.read_page(ws, proj, &cand.path) {
             Ok(m) => m,
             Err(e) => {
                 warn!(path = %cand.path, error = %e, "embed: skip unreadable page");
@@ -968,30 +966,10 @@ pub struct PurgeProjectReport {
     pub handoffs_deleted: u64,
     /// Number of `page_embeddings` rows deleted.
     pub embeddings_deleted: u64,
-    /// Paths of wiki files that were removed from disk.
+    /// Paths removed from disk (the project's UUID-namespaced directory).
     pub files_deleted: Vec<String>,
-    /// Paths whose wiki file was kept because another project still
-    /// references the same path. The wiki is flat on disk so the file
-    /// is shared between projects — deleting it would 404 the sibling.
-    pub files_skipped_shared: Vec<String>,
     /// Paths that could not be removed from disk (non-fatal; DB rows are gone).
     pub files_failed: Vec<String>,
-}
-
-impl From<&PurgeSummary> for PurgeProjectReport {
-    fn from(s: &PurgeSummary) -> Self {
-        Self {
-            label: s.label.clone(),
-            pages_deleted: s.pages_deleted,
-            sessions_deleted: s.sessions_deleted,
-            observations_deleted: s.observations_deleted,
-            handoffs_deleted: s.handoffs_deleted,
-            embeddings_deleted: s.embeddings_deleted,
-            files_deleted: Vec::new(),
-            files_skipped_shared: Vec::new(),
-            files_failed: Vec::new(),
-        }
-    }
 }
 
 async fn handle_purge_project(
@@ -1058,49 +1036,35 @@ async fn handle_purge_project(
         }
     };
 
-    // Remove wiki files — but ONLY when no other project still has an
-    // is_latest=1 page row pointing at the same path. The wiki is flat
-    // on disk (`wiki/concepts/foo.md` is shared across all projects
-    // with that path), so naïvely deleting every purged page's file
-    // would clobber files still owned by sibling projects. The DB-row
-    // purge already happened (cascaded by FK); this loop only fixes
-    // the on-disk side. Partial failures are accumulated but never
-    // abort the response.
+    // Remove the entire per-project directory: <wiki_root>/<ws_uuid>/<proj_uuid>/.
+    // DB cascade already deleted all rows; the dir removal is best-effort.
+    let proj_root = state.wiki.project_root(ws_id, proj_id);
+    let proj_root_str = proj_root.display().to_string();
     let mut files_deleted: Vec<String> = Vec::new();
-    let mut files_skipped_shared: Vec<String> = Vec::new();
     let mut files_failed: Vec<String> = Vec::new();
-    for raw_path in &summary.page_paths {
-        let still_referenced = match state.reader.path_still_referenced(raw_path.clone()).await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(path = %raw_path, error = %e, "purge-project: cross-project ref check failed; skipping delete defensively");
-                files_skipped_shared.push(raw_path.clone());
-                continue;
-            }
-        };
-        if still_referenced {
-            files_skipped_shared.push(raw_path.clone());
-            continue;
+    match std::fs::remove_dir_all(&proj_root) {
+        Ok(()) => {
+            files_deleted.push(proj_root_str);
         }
-        match ai_memory_core::PagePath::new(raw_path.clone()) {
-            Ok(pp) => match state.wiki.delete_page(&pp) {
-                Ok(()) => files_deleted.push(raw_path.clone()),
-                Err(e) => {
-                    warn!(path = %raw_path, error = %e, "purge-project: failed to delete wiki file");
-                    files_failed.push(raw_path.clone());
-                }
-            },
-            Err(e) => {
-                warn!(path = %raw_path, error = %e, "purge-project: invalid page path skipped");
-                files_failed.push(raw_path.clone());
-            }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Already absent; nothing to do.
+        }
+        Err(e) => {
+            warn!(path = %proj_root_str, error = %e, "purge-project: failed to remove project dir");
+            files_failed.push(proj_root_str);
         }
     }
 
-    let mut report = PurgeProjectReport::from(&summary);
-    report.files_deleted = files_deleted;
-    report.files_skipped_shared = files_skipped_shared;
-    report.files_failed = files_failed;
+    let report = PurgeProjectReport {
+        label: summary.label,
+        pages_deleted: summary.pages_deleted,
+        sessions_deleted: summary.sessions_deleted,
+        observations_deleted: summary.observations_deleted,
+        handoffs_deleted: summary.handoffs_deleted,
+        embeddings_deleted: summary.embeddings_deleted,
+        files_deleted,
+        files_failed,
+    };
 
     (
         StatusCode::OK,

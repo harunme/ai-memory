@@ -283,14 +283,16 @@ impl Bootstrap {
         sources: Vec<BootstrapSource>,
     ) -> Result<BootstrapOutcome, BootstrapError> {
         // ---- idempotency check ------------------------------------
-        // The reader pool's recent_pages isn't (workspace, project)-
-        // scoped, so we use the wiki's filesystem read as the cheap
-        // existence check: if `wiki/bootstrap.md` parses, this
-        // project was bootstrapped before.
+        // Check whether bootstrap.md already exists on disk in the per-project
+        // directory. If it parses cleanly, this project was bootstrapped before.
         if !cfg.force {
             let manifest_path =
                 PagePath::new("bootstrap.md").expect("hard-coded manifest path is valid");
-            if self.wiki.read_page(&manifest_path).is_ok() {
+            if self
+                .wiki
+                .read_page(cfg.workspace_id, cfg.project_id, &manifest_path)
+                .is_ok()
+            {
                 return Err(BootstrapError::AlreadyBootstrapped);
             }
         }

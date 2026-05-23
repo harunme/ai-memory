@@ -5,7 +5,8 @@
 //! with `tower::ServiceExt::oneshot`.
 
 use ai_memory_core::{
-    AgentKind, NewHandoff, NewObservation, NewSession, ObservationKind, PagePath, SessionId, Tier,
+    AgentKind, NewHandoff, NewObservation, NewSession, ObservationKind, PagePath, ProjectId,
+    SessionId, Tier, WorkspaceId,
 };
 use ai_memory_mcp::{AdminState, admin_router};
 use ai_memory_store::{DecayParams, Store};
@@ -32,8 +33,8 @@ async fn make_state(tmp: &TempDir) -> (AdminState, Store) {
         embedder: None,
         decay_params: DecayParams::default(),
         data_dir: tmp.path().to_path_buf(),
-        db_path,
         bind: "127.0.0.1:0".to_string(),
+        db_path,
     };
     (state, store)
 }
@@ -57,9 +58,9 @@ async fn post(state: AdminState, uri: &str, body: serde_json::Value) -> axum::re
 }
 
 /// Seed two projects (`default/keep` and `default/doomed`), each with one
-/// page, one session, some observations, and a handoff. Returns the wiki
-/// page path seeded for the doomed project.
-async fn seed_two_projects(store: &Store, wiki: &Wiki) -> String {
+/// page, one session, some observations, and a handoff. Returns IDs for
+/// both projects so callers can construct the per-project wiki paths.
+async fn seed_two_projects(store: &Store, wiki: &Wiki) -> (WorkspaceId, ProjectId, ProjectId) {
     let ws = store
         .writer
         .get_or_create_workspace("default")
@@ -76,7 +77,7 @@ async fn seed_two_projects(store: &Store, wiki: &Wiki) -> String {
         .await
         .unwrap();
 
-    // Write pages through the wiki so they land on disk.
+    // Write pages through the wiki so they land on disk in per-project dirs.
     wiki.write_page(WritePageRequest {
         workspace_id: ws,
         project_id: keep,
@@ -90,11 +91,10 @@ async fn seed_two_projects(store: &Store, wiki: &Wiki) -> String {
     .await
     .unwrap();
 
-    let doomed_path = "notes/doomed.md";
     wiki.write_page(WritePageRequest {
         workspace_id: ws,
         project_id: doomed,
-        path: PagePath::new(doomed_path).unwrap(),
+        path: PagePath::new("notes/doomed.md").unwrap(),
         frontmatter: serde_json::json!({"title": "Doomed page"}),
         body: "This page will be destroyed.".into(),
         tier: Tier::Semantic,
@@ -154,7 +154,7 @@ async fn seed_two_projects(store: &Store, wiki: &Wiki) -> String {
         }
     }
 
-    doomed_path.to_string()
+    (ws, keep, doomed)
 }
 
 // ---------------------------------------------------------------------------
@@ -232,17 +232,21 @@ async fn purge_project_nonexistent_workspace_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// Happy path: purge the doomed project, verify counts and file removal.
+/// Happy path: purge the doomed project, verify counts and directory removal.
 #[tokio::test]
 async fn purge_project_deletes_data_and_files() {
     let tmp = TempDir::new().unwrap();
     let (state, store) = make_state(&tmp).await;
 
-    let doomed_path = seed_two_projects(&store, &state.wiki).await;
+    let (ws, _keep, doomed) = seed_two_projects(&store, &state.wiki).await;
 
-    // File must exist before purge.
-    let file_on_disk = tmp.path().join("wiki").join(&doomed_path);
-    assert!(file_on_disk.exists(), "wiki file must exist before purge");
+    // The per-project directory must exist before purge.
+    let proj_dir = tmp
+        .path()
+        .join("wiki")
+        .join(ws.to_string())
+        .join(doomed.to_string());
+    assert!(proj_dir.exists(), "project dir must exist before purge");
 
     let resp = post(
         state,
@@ -279,20 +283,20 @@ async fn purge_project_deletes_data_and_files() {
         "one handoff deleted: {body}"
     );
 
-    // On-disk file must be gone.
+    // The entire project directory must be gone.
     assert!(
-        !file_on_disk.exists(),
-        "wiki file must be removed after purge"
+        !proj_dir.exists(),
+        "project directory must be removed after purge"
     );
 }
 
-/// After purging `doomed`, `keep` must still have all its data intact.
+/// After purging `doomed`, `keep` must still have all its data and files intact.
 #[tokio::test]
 async fn purge_project_preserves_sibling_project() {
     let tmp = TempDir::new().unwrap();
     let (state, store) = make_state(&tmp).await;
 
-    seed_two_projects(&store, &state.wiki).await;
+    let (ws, keep, _doomed) = seed_two_projects(&store, &state.wiki).await;
 
     let resp = post(
         state,
@@ -318,8 +322,14 @@ async fn purge_project_preserves_sibling_project() {
         "keep's observations must survive: {counts:?}"
     );
 
-    // keep's wiki file must still exist.
-    let keep_file = tmp.path().join("wiki/notes/keep.md");
+    // keep's wiki directory must still exist with its page.
+    let keep_dir = tmp
+        .path()
+        .join("wiki")
+        .join(ws.to_string())
+        .join(keep.to_string());
+    assert!(keep_dir.exists(), "keep's project dir must survive");
+    let keep_file = keep_dir.join("notes/keep.md");
     assert!(keep_file.exists(), "keep's wiki file must survive");
 }
 

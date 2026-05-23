@@ -18,6 +18,7 @@
 //! store updates via [`Wiki::write_page`].
 
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
 use ai_memory_core::{PagePath, ProjectId, WorkspaceId};
@@ -46,10 +47,14 @@ impl WatcherHandle {
     /// Start watching `wiki.root()` recursively. Spawns one tokio task
     /// that consumes debounced events and runs the reconciliation timer.
     ///
+    /// Events are attributed to their `(workspace_id, project_id)` by
+    /// parsing the first two path segments as UUIDs. Events outside the
+    /// `<ws_uuid>/<proj_uuid>/...` layout are silently ignored.
+    ///
     /// # Errors
     /// Propagates any notify error encountered when installing the OS
     /// watcher.
-    pub fn start(wiki: Wiki, workspace_id: WorkspaceId, project_id: ProjectId) -> WikiResult<Self> {
+    pub fn start(wiki: Wiki) -> WikiResult<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let mut debouncer = new_debouncer(
@@ -75,13 +80,7 @@ impl WatcherHandle {
             .map_err(|e| WikiError::Io(std::io::Error::other(e.to_string())))?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(run_loop(
-            wiki,
-            workspace_id,
-            project_id,
-            event_rx,
-            shutdown_rx,
-        ));
+        let task = tokio::spawn(run_loop(wiki, event_rx, shutdown_rx));
 
         Ok(Self {
             _debouncer: debouncer,
@@ -111,8 +110,6 @@ impl Drop for WatcherHandle {
 
 async fn run_loop(
     wiki: Wiki,
-    ws: WorkspaceId,
-    proj: ProjectId,
     mut rx: mpsc::UnboundedReceiver<notify_debouncer_full::DebouncedEvent>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -137,10 +134,10 @@ async fn run_loop(
                 return;
             }
             Some(event) = rx.recv() => {
-                handle_event(&wiki, ws, proj, event).await;
+                handle_event(&wiki, event).await;
             }
             _ = tick.tick() => {
-                match reconcile(&wiki, ws, proj).await {
+                match reconcile(&wiki).await {
                     Ok(()) => {
                         if consecutive_failures > 0 {
                             tracing::info!(
@@ -176,12 +173,7 @@ async fn run_loop(
     }
 }
 
-async fn handle_event(
-    wiki: &Wiki,
-    ws: WorkspaceId,
-    proj: ProjectId,
-    event: notify_debouncer_full::DebouncedEvent,
-) {
+async fn handle_event(wiki: &Wiki, event: notify_debouncer_full::DebouncedEvent) {
     if !matches!(
         event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Other
@@ -195,7 +187,7 @@ async fn handle_event(
         if is_tempfile(raw_path) {
             continue;
         }
-        let Some(page_path) = page_path_relative_to(wiki.root(), raw_path) else {
+        let Some((ws, proj, page_path)) = extract_project_ids(wiki.root(), raw_path) else {
             continue;
         };
         if !raw_path.is_file() {
@@ -209,20 +201,105 @@ async fn handle_event(
     }
 }
 
-async fn reconcile(wiki: &Wiki, ws: WorkspaceId, proj: ProjectId) -> WikiResult<()> {
+async fn reconcile(wiki: &Wiki) -> WikiResult<()> {
     let root = wiki.root().to_path_buf();
-    let paths = tokio::task::spawn_blocking(move || walk_markdown(&root))
+    // Walk all per-project subdirectories: <ws_uuid>/<proj_uuid>/
+    let project_dirs = tokio::task::spawn_blocking(move || walk_project_dirs(&root))
         .await
         .map_err(|e| WikiError::Io(std::io::Error::other(e.to_string())))??;
 
-    let count = paths.len();
-    for path in paths {
-        if let Err(e) = wiki.reindex_page(ws, proj, path.clone()).await {
-            warn!(path = %path, error = %e, "reconcile reindex failed");
+    let mut total = 0_usize;
+    for (ws, proj, proj_root) in project_dirs {
+        let pages = tokio::task::spawn_blocking(move || walk_markdown(&proj_root))
+            .await
+            .map_err(|e| WikiError::Io(std::io::Error::other(e.to_string())))??;
+        total += pages.len();
+        for path in pages {
+            if let Err(e) = wiki.reindex_page(ws, proj, path.clone()).await {
+                warn!(path = %path, error = %e, "reconcile reindex failed");
+            }
         }
     }
-    info!(count, "reconciliation pass complete");
+    info!(count = total, "reconciliation pass complete");
     Ok(())
+}
+
+/// Walk `<wiki_root>` and return all `(WorkspaceId, ProjectId, proj_root)` tuples
+/// whose first two path segments parse as valid UUIDs.
+fn walk_project_dirs(
+    wiki_root: &Path,
+) -> WikiResult<Vec<(WorkspaceId, ProjectId, std::path::PathBuf)>> {
+    let mut out = Vec::new();
+    let ws_read = match std::fs::read_dir(wiki_root) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(WikiError::Io(e)),
+    };
+    for ws_entry in ws_read {
+        let ws_entry = ws_entry?;
+        if !ws_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let ws_name = ws_entry.file_name();
+        let Some(ws_str) = ws_name.to_str() else {
+            continue;
+        };
+        let Ok(ws_id) = WorkspaceId::from_str(ws_str) else {
+            continue;
+        };
+        let proj_read = match std::fs::read_dir(ws_entry.path()) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for proj_entry in proj_read {
+            let proj_entry = proj_entry?;
+            if !proj_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let proj_name = proj_entry.file_name();
+            let Some(proj_str) = proj_name.to_str() else {
+                continue;
+            };
+            let Ok(proj_id) = ProjectId::from_str(proj_str) else {
+                continue;
+            };
+            out.push((ws_id, proj_id, proj_entry.path()));
+        }
+    }
+    Ok(out)
+}
+
+/// Parse `(WorkspaceId, ProjectId, PagePath)` from a filesystem event path.
+///
+/// Expects the path to have the structure:
+/// `<wiki_root>/<ws_uuid>/<proj_uuid>/<page-path...>`
+///
+/// Returns `None` when:
+/// - The path does not start with `wiki_root`.
+/// - The first segment is not a valid UUID (`WorkspaceId`).
+/// - The second segment is not a valid UUID (`ProjectId`).
+/// - There are no remaining segments (the page path would be empty).
+pub(crate) fn extract_project_ids(
+    wiki_root: &Path,
+    event_path: &Path,
+) -> Option<(WorkspaceId, ProjectId, PagePath)> {
+    let rel = event_path.strip_prefix(wiki_root).ok()?;
+    let mut components = rel.components();
+
+    let ws_seg = components.next()?.as_os_str().to_str()?;
+    let ws_id = WorkspaceId::from_str(ws_seg).ok()?;
+
+    let proj_seg = components.next()?.as_os_str().to_str()?;
+    let proj_id = ProjectId::from_str(proj_seg).ok()?;
+
+    // Rejoin remaining segments as the page path.
+    let page_rel: std::path::PathBuf = components.collect();
+    let page_str = page_rel.to_string_lossy().replace('\\', "/");
+    if page_str.is_empty() {
+        return None;
+    }
+    let page_path = PagePath::new(page_str).ok()?;
+    Some((ws_id, proj_id, page_path))
 }
 
 fn walk_markdown(root: &Path) -> WikiResult<Vec<PagePath>> {
@@ -300,18 +377,73 @@ mod tests {
         (tmp, store, wiki, ws, proj)
     }
 
+    /// `extract_project_ids` must parse a valid `<ws>/<proj>/<path>` triplet.
+    #[test]
+    fn extract_project_ids_valid_path() {
+        let wiki_root = Path::new("/data/wiki");
+        let ws_id = WorkspaceId::new();
+        let proj_id = ProjectId::new();
+        let event_path =
+            std::path::PathBuf::from(format!("/data/wiki/{}/{}/decisions/foo.md", ws_id, proj_id));
+        let result = extract_project_ids(wiki_root, &event_path);
+        assert!(
+            result.is_some(),
+            "must extract IDs from valid namespaced path"
+        );
+        let (ws, proj, pp) = result.unwrap();
+        assert_eq!(ws, ws_id);
+        assert_eq!(proj, proj_id);
+        assert_eq!(pp.as_str(), "decisions/foo.md");
+    }
+
+    /// `extract_project_ids` must return `None` when the first segment is not a UUID.
+    #[test]
+    fn extract_project_ids_garbage_first_segment() {
+        let wiki_root = Path::new("/data/wiki");
+        let event_path = Path::new("/data/wiki/not-a-uuid/some-proj/foo.md");
+        assert!(
+            extract_project_ids(wiki_root, event_path).is_none(),
+            "garbage first segment must return None"
+        );
+    }
+
+    /// `extract_project_ids` must return `None` for flat (non-namespaced) paths.
+    #[test]
+    fn extract_project_ids_flat_path_returns_none() {
+        let wiki_root = Path::new("/data/wiki");
+        let event_path = Path::new("/data/wiki/foo.md");
+        assert!(
+            extract_project_ids(wiki_root, event_path).is_none(),
+            "flat path with no namespace must return None"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn picks_up_externally_created_file() {
         let (tmp, store, wiki, ws, proj) = setup().await;
-        let handle = WatcherHandle::start(wiki.clone(), ws, proj).unwrap();
 
-        // Drop a file *bypassing* the wiki write API (simulating an
-        // external editor).
-        let target = tmp.path().join("wiki/external.md");
+        // Create the project directory BEFORE starting the watcher so
+        // the inotify backend adds a watch for it immediately. If we
+        // created it after, there is a race between the new-dir event
+        // and the file-write event that can cause the watcher to miss
+        // the file on slower Linux inotify instances.
+        let proj_dir = tmp
+            .path()
+            .join("wiki")
+            .join(ws.to_string())
+            .join(proj.to_string());
+        std::fs::create_dir_all(&proj_dir).unwrap();
+
+        let handle = WatcherHandle::start(wiki.clone()).unwrap();
+
+        // Drop a file inside the per-project directory, bypassing the wiki write API
+        // (simulating an external editor).
+        let target = proj_dir.join("external.md");
         std::fs::write(&target, "Hello from outside the wiki API.\n").unwrap();
 
-        // Poll for the row to land. Watcher debounces at 300ms.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // Poll for the row to land. Watcher debounces at 300ms; extra
+        // margin for slow CI environments.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut hits = Vec::new();
         while std::time::Instant::now() < deadline {
             hits = store
@@ -332,13 +464,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_picks_up_file_added_while_watcher_offline() {
         let (tmp, store, wiki, ws, proj) = setup().await;
-        // Write a file BEFORE starting the watcher.
-        let target = tmp.path().join("wiki/preexisting.md");
+
+        // Write a file BEFORE starting the watcher — directly in the project dir.
+        let proj_dir = tmp
+            .path()
+            .join("wiki")
+            .join(ws.to_string())
+            .join(proj.to_string());
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let target = proj_dir.join("preexisting.md");
         std::fs::write(&target, "I existed first.\n").unwrap();
 
-        let handle = WatcherHandle::start(wiki.clone(), ws, proj).unwrap();
+        let handle = WatcherHandle::start(wiki.clone()).unwrap();
         // Hit reconcile manually instead of waiting 30s.
-        reconcile(&wiki, ws, proj).await.unwrap();
+        reconcile(&wiki).await.unwrap();
 
         let hits = store
             .reader
@@ -364,23 +503,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn walk_markdown_skips_symlinks() {
         let tmp = TempDir::new().unwrap();
-        let wiki_root = tmp.path().join("wiki");
-        std::fs::create_dir_all(&wiki_root).unwrap();
+        let proj_root = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj_root).unwrap();
 
         // A real file (should be picked up).
-        std::fs::write(wiki_root.join("real.md"), "real content\n").unwrap();
+        std::fs::write(proj_root.join("real.md"), "real content\n").unwrap();
 
-        // A "secret" file outside the wiki root.
+        // A "secret" file outside the project root.
         let secret = tmp.path().join("secret.md");
         std::fs::write(&secret, "this is sensitive\n").unwrap();
 
-        // Plant a symlink inside wiki/ pointing at the outside file.
+        // Plant a symlink inside proj/ pointing at the outside file.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&secret, wiki_root.join("symlinked.md")).unwrap();
+        std::os::unix::fs::symlink(&secret, proj_root.join("symlinked.md")).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&secret, wiki_root.join("symlinked.md")).unwrap();
+        std::os::windows::fs::symlink_file(&secret, proj_root.join("symlinked.md")).unwrap();
 
-        let found = walk_markdown(&wiki_root).unwrap();
+        let found = walk_markdown(&proj_root).unwrap();
         let names: Vec<_> = found.iter().map(|p| p.as_str().to_string()).collect();
         assert!(names.contains(&"real.md".to_string()), "real file present");
         assert!(

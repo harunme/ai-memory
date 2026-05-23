@@ -95,7 +95,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             project = %args.project,
             "starting wiki watcher",
         );
-        Some(WatcherHandle::start(wiki.clone(), ws, proj)?)
+        Some(WatcherHandle::start(wiki.clone())?)
     };
 
     let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)

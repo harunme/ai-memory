@@ -28,7 +28,10 @@ pub(crate) async fn handler(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    let markdown_doc = match state.wiki.read_page(&page_path) {
+    let markdown_doc = match state
+        .wiki
+        .read_page(meta.workspace_id, meta.project_id, &page_path)
+    {
         Ok(doc) => doc,
         Err(_) => return not_found_response(),
     };

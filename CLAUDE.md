@@ -94,17 +94,43 @@ blocking issue:**
 12. No global singletons / `lazy_static` configs.
 13. Zero-LLM default path. LLM features opt-in via env.
 14. Tracing subscribers explicitly filter their own module.
-15. **Every command + storage operation is namespaced by the current
-    sub-dir as the project id.** The router derives the project from
-    `basename(cwd)`; bootstrap / lint / embed / forget-sweep /
-    purge-project / rename-project / consolidate ALL resolve through
-    the same helper. There is no generic `scratch` fallback in the
-    happy path — `scratch` exists only as a defensive default for
-    hook events that arrive without a `cwd` (e.g. early startup or
-    misconfigured agents). New commands/handlers that bake in a
-    `workspace_id`/`project_id` at construction time MUST look up
-    the session's actual project (via
-    `ReaderPool::session_project_ids` or equivalent) before writing.
+15. **Every command + storage operation is namespaced by the
+    project's stable surrogate `(workspace_id, project_id)` — all
+    the way down to the on-disk wiki layout.** Two layers:
+
+    a. **Surface (commands)**: the per-cwd router derives the project
+    name from `basename(cwd)`; bootstrap / lint / embed /
+    forget-sweep / purge-project / rename-project / consolidate /
+    write-page ALL resolve through `commands::resolve_project_name`
+    (or the router's `resolve_project_ids` on the server side). There
+    is no generic `scratch` fallback in the happy path — `scratch`
+    exists only as a defensive default for hook events that arrive
+    without a `cwd` (e.g. early startup or misconfigured agents).
+    Commands/handlers that bake in a `workspace_id`/`project_id` at
+    construction time MUST look up the session's actual project (via
+    `ReaderPool::session_project_ids`) before writing.
+
+    b. **Storage layout**: wiki files live at
+    `<wiki_root>/<workspace_id>/<project_id>/<page-path>`. The mutable
+    project NAME never appears in any disk path; the stable UUID
+    surrogate does. Consequences this rule enforces:
+    - Renaming a project is a single column update on
+      `projects.name`; no file moves ever.
+    - Purging a project is `std::fs::remove_dir_all(project_root)` —
+      atomic, no shared-file footgun.
+    - Two projects can have the same `pages.path` (e.g.
+      `decisions/0001.md`) without on-disk collision.
+    - `log.md` and `bootstrap.md` are per-project files inside the
+      project's namespaced dir, NOT shared at the wiki root.
+
+    Every `Wiki` API call carries `(workspace_id, project_id)`
+    either as explicit args (read_page, delete_page) or via
+    `WritePageRequest`. No call ever reads/writes at
+    `<wiki_root>/<path>` directly; always go through
+    `Wiki::project_root(ws, proj).join(path)`. The filesystem
+    watcher parses the first two path segments of every event as
+    UUIDs and uses those to stamp the reindex — events outside the
+    namespaced layout are ignored.
 16. **The CLI is always a thin HTTP client to the running MCP /
     admin server.** The server is the ground truth and the sole
     writer of wiki + SQLite. CLI commands NEVER call `Store::open`,

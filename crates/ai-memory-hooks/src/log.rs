@@ -8,24 +8,31 @@
 use std::io::Write;
 use std::path::Path;
 
+use ai_memory_core::{ProjectId, WorkspaceId};
 use jiff::{Timestamp, ToSpan, tz::TimeZone};
 use tracing::debug;
 
 use crate::payload::HookEvent;
 
-/// Append one line to `<wiki_root>/log.md`. POSIX `O_APPEND` writes of
-/// less than `PIPE_BUF` (4 KiB) are atomic, so concurrent appenders do
-/// not interleave.
+/// Append one line to `<wiki_root>/<workspace_id>/<project_id>/log.md`.
+///
+/// POSIX `O_APPEND` writes of less than `PIPE_BUF` (4 KiB) are atomic, so
+/// concurrent appenders do not interleave.
 ///
 /// # Errors
 /// Propagates any I/O failure from opening or writing the file.
 pub fn append_event(
     wiki_root: &Path,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     when: Timestamp,
     event: HookEvent,
     title: &str,
 ) -> std::io::Result<()> {
-    let log_path = wiki_root.join("log.md");
+    let log_path = wiki_root
+        .join(workspace_id.to_string())
+        .join(project_id.to_string())
+        .join("log.md");
     let line = format_line(when, event, title);
     debug!(path = %log_path.display(), bytes = line.len(), "appending log entry");
 
@@ -93,10 +100,16 @@ mod tests {
     fn append_creates_file_and_grows() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let ws = WorkspaceId::new();
+        let proj = ProjectId::new();
         let now = Timestamp::now();
-        append_event(root, now, HookEvent::SessionStart, "first").unwrap();
-        append_event(root, now, HookEvent::UserPrompt, "second").unwrap();
-        let contents = std::fs::read_to_string(root.join("log.md")).unwrap();
+        append_event(root, ws, proj, now, HookEvent::SessionStart, "first").unwrap();
+        append_event(root, ws, proj, now, HookEvent::UserPrompt, "second").unwrap();
+        let log_path = root
+            .join(ws.to_string())
+            .join(proj.to_string())
+            .join("log.md");
+        let contents = std::fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("session-start | first"));
         assert!(contents.contains("user-prompt | second"));
         // Two lines.

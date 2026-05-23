@@ -93,7 +93,15 @@ pub async fn run_lint(
     let mut findings = rule_based_findings(&candidates);
 
     if let Some(provider) = llm {
-        match contradiction_pass(provider.clone(), wiki, &candidates).await {
+        match contradiction_pass(
+            provider.clone(),
+            wiki,
+            workspace_id,
+            project_id,
+            &candidates,
+        )
+        .await
+        {
             Ok(mut extra) => findings.append(&mut extra),
             Err(e) => warn!(error = %e, "lint LLM contradiction pass failed"),
         }
@@ -184,6 +192,8 @@ fn rule_based_findings(candidates: &[DecayCandidate]) -> Vec<LintFinding> {
 async fn contradiction_pass(
     provider: std::sync::Arc<dyn LlmProvider>,
     wiki: &Wiki,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     candidates: &[DecayCandidate],
 ) -> Result<Vec<LintFinding>, LintError> {
     // Focus on semantic / procedural pages — those are the ones the
@@ -206,7 +216,7 @@ async fn contradiction_pass(
     );
     for c in &subset {
         let preview = wiki
-            .read_page(&c.path)
+            .read_page(workspace_id, project_id, &c.path)
             .map(|md| md.body.chars().take(400).collect::<String>())
             .unwrap_or_else(|_| "(unable to read)".into());
         prompt.push_str(&format!("## `{}`\n\n{}\n\n---\n\n", c.path, preview));

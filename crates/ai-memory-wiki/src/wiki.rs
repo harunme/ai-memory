@@ -98,24 +98,44 @@ impl Wiki {
         &self.root
     }
 
-    /// Absolute on-disk path for a given [`PagePath`].
+    /// Resolve the on-disk root for a project: `<wiki_root>/<ws>/<proj>`.
+    /// All page files for this project live under this directory.
     #[must_use]
-    pub fn abs_path(&self, path: &PagePath) -> PathBuf {
-        self.root.join(path.as_str())
+    pub fn project_root(&self, workspace_id: WorkspaceId, project_id: ProjectId) -> PathBuf {
+        self.root
+            .join(workspace_id.to_string())
+            .join(project_id.to_string())
     }
 
-    /// Read the page at `path` from disk.
+    /// Absolute on-disk path for a page within a specific project.
+    #[must_use]
+    pub fn abs_path(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+    ) -> PathBuf {
+        self.project_root(workspace_id, project_id)
+            .join(path.as_str())
+    }
+
+    /// Read the page at `path` from disk for the given project.
     ///
     /// # Errors
     /// Returns [`WikiError::Io`] if the file is missing or unreadable, or
     /// [`WikiError::Yaml`] if the frontmatter block is malformed.
-    pub fn read_page(&self, path: &PagePath) -> WikiResult<Markdown> {
-        let abs = self.abs_path(path);
+    pub fn read_page(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+    ) -> WikiResult<Markdown> {
+        let abs = self.abs_path(workspace_id, project_id, path);
         let raw = std::fs::read_to_string(&abs)?;
         parse(&raw)
     }
 
-    /// Delete the on-disk file for `path`.
+    /// Delete the on-disk file for `path` within the given project.
     ///
     /// Returns `Ok(())` when the file was removed or did not exist (idempotent).
     /// The file watcher will observe the deletion; the sha256 short-circuit in
@@ -124,8 +144,13 @@ impl Wiki {
     ///
     /// # Errors
     /// Returns [`WikiError::Io`] for any OS error other than "not found".
-    pub fn delete_page(&self, path: &PagePath) -> WikiResult<()> {
-        let abs = self.abs_path(path);
+    pub fn delete_page(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &PagePath,
+    ) -> WikiResult<()> {
+        let abs = self.abs_path(workspace_id, project_id, path);
         match std::fs::remove_file(&abs) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -155,7 +180,7 @@ impl Wiki {
         project_id: ProjectId,
         path: PagePath,
     ) -> WikiResult<PageId> {
-        let md = self.read_page(&path)?;
+        let md = self.read_page(workspace_id, project_id, &path)?;
         let title = derive_title(&md.frontmatter, &md.body, &path);
         let id = self
             .writer
@@ -202,7 +227,7 @@ impl Wiki {
                 body: req.body.clone(),
             };
             let emitted = emit(&markdown)?;
-            let abs = self.abs_path(&req.path);
+            let abs = self.abs_path(req.workspace_id, req.project_id, &req.path);
             let parent = abs.parent().ok_or_else(|| {
                 ai_memory_wiki_error("page path has no parent (cannot stage tempfile)")
             })?;
@@ -282,7 +307,10 @@ impl Wiki {
             body: body.clone(),
         };
         let emitted = emit(&markdown)?;
-        let abs = self.abs_path(&path);
+        let abs = self.abs_path(workspace_id, project_id, &path);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         atomic::write_atomic(&abs, emitted.as_bytes())?;
 
         let page_id = self
@@ -406,8 +434,15 @@ mod tests {
             .unwrap();
         let _ = id; // any non-zero PageId is sufficient
 
-        // File is on disk with the frontmatter back.
-        let on_disk = std::fs::read_to_string(tmp.path().join("wiki/notes/karpathy.md")).unwrap();
+        // File is on disk at the per-project location.
+        let on_disk = std::fs::read_to_string(
+            tmp.path()
+                .join("wiki")
+                .join(ws.to_string())
+                .join(proj.to_string())
+                .join("notes/karpathy.md"),
+        )
+        .unwrap();
         assert!(on_disk.starts_with("---\n"));
         assert!(on_disk.contains("title: Karpathy LLM Wiki"));
         assert!(on_disk.contains("Karpathy says"));
@@ -456,7 +491,14 @@ mod tests {
         .await
         .unwrap();
 
-        let on_disk = std::fs::read_to_string(tmp.path().join("wiki/notes/leaky.md")).unwrap();
+        let on_disk = std::fs::read_to_string(
+            tmp.path()
+                .join("wiki")
+                .join(ws.to_string())
+                .join(proj.to_string())
+                .join("notes/leaky.md"),
+        )
+        .unwrap();
         // The on-disk page must not contain any of the planted
         // secrets; each should have been replaced with [REDACTED].
         assert!(
@@ -518,7 +560,12 @@ mod tests {
         let ids = wiki.apply_batch(batch).await.unwrap();
         assert_eq!(ids.len(), 5);
         for i in 0..5 {
-            let path = tmp.path().join(format!("wiki/batch/{i}.md"));
+            let path = tmp
+                .path()
+                .join("wiki")
+                .join(ws.to_string())
+                .join(proj.to_string())
+                .join(format!("batch/{i}.md"));
             assert!(path.is_file(), "missing file {i}");
             let body = std::fs::read_to_string(&path).unwrap();
             assert!(body.contains(&format!("Page {i}")));
@@ -527,6 +574,78 @@ mod tests {
         assert_eq!(counts.pages_latest, 5);
         let hits = store.reader.search_pages("batch".into(), 10).await.unwrap();
         assert_eq!(hits.len(), 5);
+    }
+
+    /// Two projects writing the same relative path must produce two distinct
+    /// files under their respective UUID-namespaced directories.
+    #[tokio::test]
+    async fn two_projects_same_path_no_collision() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj_a = store
+            .writer
+            .get_or_create_project(ws, "alpha", None)
+            .await
+            .unwrap();
+        let proj_b = store
+            .writer
+            .get_or_create_project(ws, "beta", None)
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+
+        wiki.write_page(WritePageRequest {
+            workspace_id: ws,
+            project_id: proj_a,
+            path: PagePath::new("decisions/foo.md").unwrap(),
+            frontmatter: serde_json::json!({"title": "Alpha decision"}),
+            body: "Alpha body".into(),
+            tier: Tier::Semantic,
+            pinned: false,
+            title: None,
+        })
+        .await
+        .unwrap();
+
+        wiki.write_page(WritePageRequest {
+            workspace_id: ws,
+            project_id: proj_b,
+            path: PagePath::new("decisions/foo.md").unwrap(),
+            frontmatter: serde_json::json!({"title": "Beta decision"}),
+            body: "Beta body".into(),
+            tier: Tier::Semantic,
+            pinned: false,
+            title: None,
+        })
+        .await
+        .unwrap();
+
+        let path_a = tmp
+            .path()
+            .join("wiki")
+            .join(ws.to_string())
+            .join(proj_a.to_string())
+            .join("decisions/foo.md");
+        let path_b = tmp
+            .path()
+            .join("wiki")
+            .join(ws.to_string())
+            .join(proj_b.to_string())
+            .join("decisions/foo.md");
+
+        assert!(path_a.is_file(), "alpha file must exist");
+        assert!(path_b.is_file(), "beta file must exist");
+        assert_ne!(path_a, path_b, "distinct paths on disk");
+
+        let content_a = std::fs::read_to_string(&path_a).unwrap();
+        let content_b = std::fs::read_to_string(&path_b).unwrap();
+        assert!(content_a.contains("Alpha body"), "alpha content intact");
+        assert!(content_b.contains("Beta body"), "beta content intact");
     }
 
     #[tokio::test]

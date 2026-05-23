@@ -286,9 +286,11 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
         .insert_observation(sanitized.inner().clone())
         .await?;
 
-    // Append the log line.
+    // Append the log line to the per-project log.md.
     if let Err(e) = log::append_event(
         state.wiki.root(),
+        ws,
+        proj,
         Timestamp::now(),
         env.event,
         sanitized.inner().title.as_str(),

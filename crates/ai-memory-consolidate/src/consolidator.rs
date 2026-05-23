@@ -124,7 +124,7 @@ impl Consolidator {
         let path = PagePath::new(format!("sessions/{session_id}.md"))?;
         let current_body = self
             .wiki
-            .read_page(&path)
+            .read_page(ws, proj, &path)
             .map(|md| md.body)
             .unwrap_or_default();
         let request = build_request(session_id, &observations, &current_body);
