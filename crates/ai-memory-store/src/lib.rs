@@ -22,8 +22,8 @@ mod writer;
 pub use decay::{DecayParams, retention_score};
 pub use error::{StoreError, StoreResult};
 pub use reader::{
-    ActivityWindow, BriefingPage, BriefingSnapshot, DecayCandidate, PageHit, ReaderPool,
-    StatusCounts, StoredEmbedding, f32_vec_to_bytes,
+    ActivityWindow, BriefingPage, BriefingSnapshot, DecayCandidate, PageHit, PageMeta, PageSummary,
+    ProjectSummary, ReaderPool, StatusCounts, StoredEmbedding, f32_vec_to_bytes,
 };
 pub use writer::WriterHandle;
 
@@ -302,5 +302,125 @@ mod tests {
             "snippet should come from the latest version, got: {}",
             hits[0].snippet
         );
+    }
+
+    #[tokio::test]
+    async fn list_projects_with_stats_returns_aggregates() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "my-project", None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "a.md", "alpha"))
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "b.md", "beta"))
+            .await
+            .unwrap();
+
+        let summaries = store.reader.list_projects_with_stats().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        let s = &summaries[0];
+        assert_eq!(s.workspace_name, "default");
+        assert_eq!(s.project_name, "my-project");
+        assert_eq!(s.page_count, 2);
+        assert!(s.last_updated.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_pages_returns_latest_pages_for_project() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "x.md", "body x"))
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "y.md", "body y"))
+            .await
+            .unwrap();
+        // Supersede x.md — should still appear once (latest version).
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "x.md", "body x updated"))
+            .await
+            .unwrap();
+
+        let pages = store.reader.list_pages("default", "scratch").await.unwrap();
+        assert_eq!(pages.len(), 2, "only is_latest=1 pages");
+        let paths: Vec<&str> = pages.iter().map(|p| p.path.as_str()).collect();
+        assert!(paths.contains(&"x.md"));
+        assert!(paths.contains(&"y.md"));
+    }
+
+    #[tokio::test]
+    async fn page_meta_returns_metadata_for_existing_page() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "meta-test", None)
+            .await
+            .unwrap();
+        let page = NewPage {
+            workspace_id: ws,
+            project_id: proj,
+            path: PagePath::new("decisions/d1.md").unwrap(),
+            title: "Decision One".into(),
+            body: "content here".into(),
+            tier: Tier::Semantic,
+            frontmatter_json: serde_json::json!({"kind": "decision"}),
+            pinned: true,
+        };
+        store.writer.upsert_page(page).await.unwrap();
+
+        let meta = store
+            .reader
+            .page_meta("default", "meta-test", "decisions/d1.md")
+            .await
+            .unwrap();
+        let meta = meta.expect("page_meta should return Some for existing page");
+        assert_eq!(meta.workspace_name, "default");
+        assert_eq!(meta.project_name, "meta-test");
+        assert_eq!(meta.path, "decisions/d1.md");
+        assert_eq!(meta.title, "Decision One");
+        assert_eq!(meta.kind, "decision");
+        assert!(meta.pinned);
+
+        // Non-existent page returns None.
+        let none = store
+            .reader
+            .page_meta("default", "meta-test", "no-such.md")
+            .await
+            .unwrap();
+        assert!(none.is_none());
     }
 }

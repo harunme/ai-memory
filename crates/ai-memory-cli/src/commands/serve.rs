@@ -8,6 +8,7 @@ use ai_memory_hooks::{HookState, hook_router};
 use ai_memory_llm::{build_embedder, embedder_from_env, provider_from_env};
 use ai_memory_mcp::AiMemoryServer;
 use ai_memory_store::Store;
+use ai_memory_web;
 use ai_memory_wiki::{WatcherHandle, Wiki};
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
@@ -181,9 +182,33 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 .or_else(|| config.auth.bearer_token.clone());
             let auth_state = Arc::new(AuthState::new(token));
             let auth_enabled = auth_state.enabled();
-            let router = axum::Router::new()
+            let mut router = axum::Router::new()
                 .nest_service("/mcp", mcp_service)
-                .merge(hooks)
+                .merge(hooks);
+
+            // Register the web router BEFORE applying the bearer
+            // middleware. In axum 0.8, `.layer()` only attaches to
+            // routes registered before the call — nesting after the
+            // layer would silently bypass auth for /web/*.
+            if args.enable_web {
+                let web_router = ai_memory_web::router(store.reader.clone(), wiki.clone());
+                // Also accept the trailing-slash form. axum 0.8's
+                // `nest("/web", ..)` matches `/web` (no slash) → inner
+                // `route("/")` but doesn't match `/web/` (a browser's
+                // default when the user types the bare prefix), so we
+                // redirect that explicitly to keep both URLs working.
+                router = router
+                    .route(
+                        "/web/",
+                        axum::routing::get(|| async {
+                            axum::response::Redirect::permanent("/web")
+                        }),
+                    )
+                    .nest("/web", web_router);
+                info!("read-only wiki browser mounted at /web");
+            }
+
+            let router = router
                 .layer(axum::middleware::from_fn_with_state(
                     auth_state,
                     require_bearer,

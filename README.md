@@ -201,6 +201,28 @@ docker cp ai-memory:/data/wiki ./my-ai-memory-wiki
 docker exec ai-memory git -C /data/wiki log --oneline
 ```
 
+### Browse the wiki in a browser
+
+For a more navigable view, start the server with `--enable-web` and
+open `http://<host>:49374/web` in any browser. Project-list homepage,
+per-project page tree with breadcrumbs, rendered markdown with syntax
+highlighting and metadata (tier, kind, pinned, supersedes chain),
+plus FTS5 search — all read-only, no editing. Light/dark theme
+follows your OS setting via `prefers-color-scheme`.
+
+```bash
+ai-memory serve --transport http --bind 127.0.0.1:49374 --enable-web
+# or, if you run via docker compose, add it to the command line in
+# docker-compose.yml: ["serve", "--transport", "http", "--bind",
+# "0.0.0.0:49374", "--enable-web"]
+```
+
+The web routes are mounted at `/web` on the same axum server as the
+MCP endpoint, so the bearer-auth posture is identical (set
+`AI_MEMORY_AUTH_TOKEN` and pass `Authorization: Bearer …` from the
+browser, or front the server with a reverse proxy that handles its
+own auth, or keep the bind loopback-only).
+
 ### Rules vs facts — ai-memory tells you when something belongs in CLAUDE.md
 
 When you type something like "don't forget to never add a function

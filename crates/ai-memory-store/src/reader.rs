@@ -108,6 +108,63 @@ pub struct BriefingPage {
     pub updated_at: String,
 }
 
+/// One row per (workspace, project) with aggregate stats.
+/// Returned by [`ReaderPool::list_projects_with_stats`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectSummary {
+    /// Name of the workspace.
+    pub workspace_name: String,
+    /// Name of the project within the workspace.
+    pub project_name: String,
+    /// Number of `is_latest = 1` pages.
+    pub page_count: u64,
+    /// ISO-8601 timestamp of the newest `updated_at`, or `None` when
+    /// the project has no pages yet.
+    pub last_updated: Option<String>,
+}
+
+/// Page summary for tree-view rendering (no body).
+/// Returned by [`ReaderPool::list_pages`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PageSummary {
+    /// Relative path within the wiki tree.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// Semantic kind: `fact` | `rule` | `decision` | `gotcha` | …
+    pub kind: String,
+    /// Memory tier: `working` | `episodic` | `semantic` | `procedural`.
+    pub tier: String,
+    /// ISO-8601 timestamp of last update.
+    pub updated_at: String,
+}
+
+/// Full page metadata for the page-view template.
+/// Returned by [`ReaderPool::page_meta`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PageMeta {
+    /// Name of the workspace.
+    pub workspace_name: String,
+    /// Name of the project.
+    pub project_name: String,
+    /// Relative wiki path.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// Semantic kind.
+    pub kind: String,
+    /// Memory tier.
+    pub tier: String,
+    /// Whether the page is pinned (decay-immune).
+    pub pinned: bool,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// ISO-8601 last-update timestamp.
+    pub updated_at: String,
+    /// Path of the page this one supersedes, if any.
+    pub supersedes: Option<String>,
+}
+
 /// Cheap, cloneable read-only connection pool handle.
 #[derive(Clone)]
 pub struct ReaderPool {
@@ -666,6 +723,286 @@ impl ReaderPool {
                 rules,
                 recent_pages,
             })
+        })
+        .await
+    }
+
+    /// Look up a page's workspace and project names by its path (across all
+    /// workspaces and projects). Returns the first `is_latest = 1` match.
+    ///
+    /// Used by the web search handler to resolve workspace/project for a hit
+    /// without a per-hit SQL join.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn page_meta_by_path(&self, path: &str) -> StoreResult<Option<PageMeta>> {
+        let path = path.to_owned();
+        self.with_conn(move |conn| {
+            let row_opt = conn
+                .query_row(
+                    "SELECT w.name, p.name, pg.path, pg.title, \
+                            COALESCE(json_extract(pg.frontmatter_json, '$.kind'), 'fact'), \
+                            pg.tier, pg.pinned, pg.created_at, pg.updated_at, \
+                            sp.path AS supersedes_path \
+                     FROM pages pg \
+                     JOIN projects p ON p.id = pg.project_id \
+                     JOIN workspaces w ON w.id = pg.workspace_id \
+                     LEFT JOIN pages sp ON sp.id = pg.supersedes \
+                     WHERE pg.path = ?1 AND pg.is_latest = 1 \
+                     LIMIT 1",
+                    params![path],
+                    |row| {
+                        let workspace_name: String = row.get(0)?;
+                        let project_name: String = row.get(1)?;
+                        let path: String = row.get(2)?;
+                        let title: String = row.get(3)?;
+                        let kind: String = row.get(4)?;
+                        let tier: String = row.get(5)?;
+                        let pinned: i64 = row.get(6)?;
+                        let created_us: i64 = row.get(7)?;
+                        let updated_us: i64 = row.get(8)?;
+                        let supersedes_path: Option<String> = row.get(9)?;
+                        Ok((
+                            workspace_name,
+                            project_name,
+                            path,
+                            title,
+                            kind,
+                            tier,
+                            pinned,
+                            created_us,
+                            updated_us,
+                            supersedes_path,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((
+                workspace_name,
+                project_name,
+                path,
+                title,
+                kind,
+                tier,
+                pinned,
+                created_us,
+                updated_us,
+                supersedes,
+            )) = row_opt
+            else {
+                return Ok(None);
+            };
+
+            let created_at = jiff::Timestamp::from_microsecond(created_us)
+                .map(|ts| ts.to_string())
+                .unwrap_or_default();
+            let updated_at = jiff::Timestamp::from_microsecond(updated_us)
+                .map(|ts| ts.to_string())
+                .unwrap_or_default();
+
+            Ok(Some(PageMeta {
+                workspace_name,
+                project_name,
+                path,
+                title,
+                kind,
+                tier,
+                pinned: pinned != 0,
+                created_at,
+                updated_at,
+                supersedes,
+            }))
+        })
+        .await
+    }
+
+    /// Return one row per (workspace, project) with page-count and
+    /// last-updated aggregates. Used by the web UI project-list view.
+    ///
+    /// Only `is_latest = 1` pages are counted.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn list_projects_with_stats(&self) -> StoreResult<Vec<ProjectSummary>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT w.name AS workspace_name, \
+                        p.name AS project_name, \
+                        COUNT(pg.id) AS page_count, \
+                        MAX(pg.updated_at) AS last_updated_us \
+                 FROM workspaces w \
+                 JOIN projects p ON p.workspace_id = w.id \
+                 LEFT JOIN pages pg ON pg.project_id = p.id AND pg.is_latest = 1 \
+                 GROUP BY w.id, p.id \
+                 ORDER BY last_updated_us DESC NULLS LAST",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let workspace_name: String = row.get(0)?;
+                let project_name: String = row.get(1)?;
+                let page_count: i64 = row.get(2)?;
+                let last_updated_us: Option<i64> = row.get(3)?;
+                Ok((workspace_name, project_name, page_count, last_updated_us))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (workspace_name, project_name, page_count, last_updated_us) = r?;
+                let last_updated = last_updated_us
+                    .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
+                    .map(|ts| ts.to_string());
+                #[allow(clippy::cast_sign_loss)]
+                out.push(ProjectSummary {
+                    workspace_name,
+                    project_name,
+                    page_count: page_count.max(0) as u64,
+                    last_updated,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// All `is_latest = 1` pages under a given (workspace, project),
+    /// ordered by path ascending. Used by the web UI tree view.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn list_pages(
+        &self,
+        workspace: &str,
+        project: &str,
+    ) -> StoreResult<Vec<PageSummary>> {
+        let workspace = workspace.to_owned();
+        let project = project.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT pg.path, pg.title, \
+                        COALESCE(json_extract(pg.frontmatter_json, '$.kind'), 'fact') AS kind, \
+                        pg.tier, pg.updated_at \
+                 FROM pages pg \
+                 JOIN projects p ON p.id = pg.project_id \
+                 JOIN workspaces w ON w.id = pg.workspace_id \
+                 WHERE w.name = ?1 AND p.name = ?2 AND pg.is_latest = 1 \
+                 ORDER BY pg.path ASC",
+            )?;
+            let rows = stmt.query_map(params![workspace, project], |row| {
+                let path: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let tier: String = row.get(3)?;
+                let updated_us: i64 = row.get(4)?;
+                Ok((path, title, kind, tier, updated_us))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (path, title, kind, tier, updated_us) = r?;
+                let updated_at = jiff::Timestamp::from_microsecond(updated_us)
+                    .map(|ts| ts.to_string())
+                    .unwrap_or_default();
+                out.push(PageSummary {
+                    path,
+                    title,
+                    kind,
+                    tier,
+                    updated_at,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Full page metadata for the page-view template (body comes from
+    /// `Wiki::read_page`). Returns `None` when no `is_latest = 1` row
+    /// matches the given path.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn page_meta(
+        &self,
+        workspace: &str,
+        project: &str,
+        page_path: &str,
+    ) -> StoreResult<Option<PageMeta>> {
+        let workspace = workspace.to_owned();
+        let project = project.to_owned();
+        let page_path = page_path.to_owned();
+        self.with_conn(move |conn| {
+            let row_opt = conn
+                .query_row(
+                    "SELECT w.name, p.name, pg.path, pg.title, \
+                            COALESCE(json_extract(pg.frontmatter_json, '$.kind'), 'fact'), \
+                            pg.tier, pg.pinned, pg.created_at, pg.updated_at, \
+                            sp.path AS supersedes_path \
+                     FROM pages pg \
+                     JOIN projects p ON p.id = pg.project_id \
+                     JOIN workspaces w ON w.id = pg.workspace_id \
+                     LEFT JOIN pages sp ON sp.id = pg.supersedes \
+                     WHERE w.name = ?1 AND p.name = ?2 AND pg.path = ?3 AND pg.is_latest = 1",
+                    params![workspace, project, page_path],
+                    |row| {
+                        let workspace_name: String = row.get(0)?;
+                        let project_name: String = row.get(1)?;
+                        let path: String = row.get(2)?;
+                        let title: String = row.get(3)?;
+                        let kind: String = row.get(4)?;
+                        let tier: String = row.get(5)?;
+                        let pinned: i64 = row.get(6)?;
+                        let created_us: i64 = row.get(7)?;
+                        let updated_us: i64 = row.get(8)?;
+                        let supersedes_path: Option<String> = row.get(9)?;
+                        Ok((
+                            workspace_name,
+                            project_name,
+                            path,
+                            title,
+                            kind,
+                            tier,
+                            pinned,
+                            created_us,
+                            updated_us,
+                            supersedes_path,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((
+                workspace_name,
+                project_name,
+                path,
+                title,
+                kind,
+                tier,
+                pinned,
+                created_us,
+                updated_us,
+                supersedes,
+            )) = row_opt
+            else {
+                return Ok(None);
+            };
+
+            let created_at = jiff::Timestamp::from_microsecond(created_us)
+                .map(|ts| ts.to_string())
+                .unwrap_or_default();
+            let updated_at = jiff::Timestamp::from_microsecond(updated_us)
+                .map(|ts| ts.to_string())
+                .unwrap_or_default();
+
+            Ok(Some(PageMeta {
+                workspace_name,
+                project_name,
+                path,
+                title,
+                kind,
+                tier,
+                pinned: pinned != 0,
+                created_at,
+                updated_at,
+                supersedes,
+            }))
         })
         .await
     }

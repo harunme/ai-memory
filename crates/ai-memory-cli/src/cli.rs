@@ -490,6 +490,12 @@ pub struct ServeArgs {
     /// Project name within the workspace (auto-created).
     #[arg(long, default_value = "scratch")]
     pub project: String,
+    /// Mount the read-only wiki browser at /web. Off by default. When
+    /// enabled, anyone who can reach the MCP endpoint can also browse
+    /// the wiki — keep the bind loopback-only or front with a reverse
+    /// proxy that handles its own auth if you expose it.
+    #[arg(long)]
+    pub enable_web: bool,
 }
 
 /// Arguments for `write-page`.

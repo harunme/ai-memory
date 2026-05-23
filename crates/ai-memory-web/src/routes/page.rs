@@ -1,0 +1,64 @@
+//! `GET /w/:workspace/:project/p/*path` — rendered markdown page.
+
+use std::sync::Arc;
+
+use ai_memory_core::PagePath;
+use askama::Template;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
+
+use crate::markdown;
+use crate::state::WebState;
+use crate::templates::{NotFoundView, PageView, humanize};
+
+/// Handler for `GET /w/:workspace/:project/p/*path`.
+pub(crate) async fn handler(
+    State(state): State<Arc<WebState>>,
+    Path((workspace, project, path)): Path<(String, String, String)>,
+) -> Response {
+    let meta = match state.reader.page_meta(&workspace, &project, &path).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return not_found_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let page_path = match PagePath::new(&path) {
+        Ok(p) => p,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let markdown_doc = match state.wiki.read_page(&page_path) {
+        Ok(doc) => doc,
+        Err(_) => return not_found_response(),
+    };
+
+    let body_html = markdown::render(&markdown_doc.body);
+
+    match (PageView {
+        workspace,
+        project,
+        path: meta.path,
+        title: meta.title,
+        kind: meta.kind,
+        tier: meta.tier,
+        pinned: meta.pinned,
+        updated_relative: humanize(&meta.updated_at),
+        created_relative: humanize(&meta.created_at),
+        supersedes_path: meta.supersedes.unwrap_or_default(),
+        body_html,
+    }
+    .render())
+    {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Render a 404 response with the not-found template body.
+fn not_found_response() -> Response {
+    let html = NotFoundView {}
+        .render()
+        .unwrap_or_else(|_| "<h1>Not found</h1>".to_owned());
+    (StatusCode::NOT_FOUND, Html(html)).into_response()
+}

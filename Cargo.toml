@@ -8,6 +8,7 @@ members = [
     "crates/ai-memory-hooks",
     "crates/ai-memory-llm",
     "crates/ai-memory-consolidate",
+    "crates/ai-memory-web",
     "crates/ai-memory-cli",
     # Live A/B harness — not part of the shipped binary, but in
     # the workspace so it shares deps + builds with the rest.
@@ -31,6 +32,7 @@ ai-memory-mcp = { path = "crates/ai-memory-mcp", version = "0.1.0" }
 ai-memory-hooks = { path = "crates/ai-memory-hooks", version = "0.1.0" }
 ai-memory-llm = { path = "crates/ai-memory-llm", version = "0.1.0" }
 ai-memory-consolidate = { path = "crates/ai-memory-consolidate", version = "0.1.0" }
+ai-memory-web = { path = "crates/ai-memory-web", version = "0.1.0" }
 
 # (Workspace shared deps follow below)
 
