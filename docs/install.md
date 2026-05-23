@@ -3,6 +3,8 @@
 The [README quick-start](../README.md#quick-start) covers the happy
 path (docker + Claude Code). This page covers everything else:
 
+- [Server on a different machine](#server-on-a-different-machine)
+  (homelab, LAN box, remote server)
 - [Configuring other agent CLIs](#configuring-other-agent-clis)
   (Codex, OpenCode, Cursor, Claude Desktop, Gemini CLI, OpenClaw, pi)
 - [Installing hooks without docker](#installing-hooks-without-docker)
@@ -23,7 +25,53 @@ path (docker + Claude Code). This page covers everything else:
 
 ---
 
+## Server on a different machine
+
+When the ai-memory server runs on a LAN box (homelab, headless server)
+and you use Claude Code / Codex / etc. on a laptop:
+
+### Server side (the homelab host)
+
+```bash
+docker run -d --name ai-memory \
+    --restart unless-stopped \
+    -p 0.0.0.0:49374:49374 \
+    -v ai-memory-data:/data \
+    -e AI_MEMORY_AUTH_TOKEN="$TOKEN" \
+    -e AI_MEMORY_ALLOWED_HOSTS="<server-ip>,localhost,127.0.0.1" \
+    -e AI_MEMORY_LLM_PROVIDER=anthropic \
+    -e ANTHROPIC_API_KEY=sk-ant-... \
+    akitaonrails/ai-memory:latest
+```
+
+See [Security](../README.md#security) in the README for why
+`AI_MEMORY_AUTH_TOKEN` and `AI_MEMORY_ALLOWED_HOSTS` are both
+required for any non-loopback bind.
+
+### Client side (the laptop)
+
+```bash
+export AI_MEMORY_SERVER_URL="http://<server-ip>:49374"
+export AI_MEMORY_AUTH_TOKEN="$TOKEN"
+
+ai-memory install-mcp   --client claude-code --apply \
+    --server-url "http://<server-ip>:49374/mcp"
+ai-memory install-hooks --agent  claude-code --apply \
+    --server-url "http://<server-ip>:49374"
+```
+
+The CLI commands (`bootstrap`, `status`, `search`, `lint`, etc.) inherit the
+two env vars automatically.
+
+---
+
 ## Configuring other agent CLIs
+
+> `install-mcp --server-url` takes the MCP endpoint **including** `/mcp`
+> (e.g. `http://homelab:49374/mcp`) — the rendered client config expects the
+> full MCP URL. `install-hooks --server-url` takes the bare server **origin**
+> (e.g. `http://homelab:49374`) — hook scripts append `/hook`, `/handoff`,
+> etc. themselves.
 
 Each agent CLI needs two things:
 
@@ -169,6 +217,10 @@ This path is friction-free when:
 
 ## Running ai-memory without docker
 
+Most users should stick to the docker wrapper from the Quick start. Build from
+source only when hacking on ai-memory itself or running on a platform docker
+doesn't support.
+
 ```bash
 git clone https://github.com/akitaonrails/ai-memory ~/.ai-memory
 cd ~/.ai-memory
@@ -211,10 +263,15 @@ If you set only the provider, ai-memory picks a sensible default:
 
 | Setting | Default | Why |
 |---|---|---|
-| `AI_MEMORY_LLM_PROVIDER=anthropic` | `claude-sonnet-4-6` | Smart enough to summarise; cheap enough to run on every session-end. Not a reasoning model. |
-| `AI_MEMORY_LLM_PROVIDER=openai` | `gpt-4o-mini` | OpenAI equivalent to the Sonnet tier in price/quality. |
+| `AI_MEMORY_LLM_PROVIDER=anthropic` | `claude-haiku-4-5` | **Recommended default.** Best balance of speed, restraint, and classification quality. Not a reasoning model. Consistently classifies durable project rules as `kind: rule`. |
+| `AI_MEMORY_LLM_PROVIDER=openai` | `gpt-5.4-mini` | Cheaper + faster alternative. Same parse reliability; mild over-classification on thin sessions. |
 | `AI_MEMORY_EMBEDDING_PROVIDER=openai` | `text-embedding-3-small` (1536-dim) | 5× cheaper than `-3-large` with marginal recall loss. |
 | `AI_MEMORY_EMBEDDING_PROVIDER=voyage` | `voyage-3` (1024-dim) | Voyage's current general-purpose recommendation. |
+
+> **What we don't recommend:** reasoning-mode models (Claude with extended
+> thinking, GPT-o3, Gemini "thinking" variants) — they burn token budget on
+> internal reasoning and hang or emit empty responses with the strict-JSON
+> consolidation prompt. Turn reasoning off if you must use one.
 
 ### Self-hosted LLMs (Ollama / vLLM / LM Studio / OpenRouter)
 
@@ -374,21 +431,12 @@ critical pairing — **no bearer token AND loopback only** is the only
 safe combination. The startup log will warn loudly if you bind to a
 LAN address without setting `AI_MEMORY_AUTH_TOKEN`.
 
-Then register the agent CLI without the `Authorization` header:
+Then wire up the agent CLI. Both commands default to no auth and
+`http://127.0.0.1:49374` — no extra flags needed for the local case:
 
 ```bash
-claude mcp add --transport http ai-memory http://localhost:49374/mcp
-```
-
-And register hooks without `--auth-token`:
-
-```bash
-docker run --rm -v "$HOME/.ai-memory:/host" \
-    akitaonrails/ai-memory:latest \
-    setup-agent --agent claude-code \
-        --to /host/hooks \
-        --host-prefix "$HOME/.ai-memory/hooks" \
-        --server-url "http://localhost:49374"
+ai-memory install-mcp   --client claude-code --apply
+ai-memory install-hooks --agent  claude-code --apply
 ```
 
 ---

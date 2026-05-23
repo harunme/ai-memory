@@ -1,5 +1,10 @@
 # MCP install guide — additional clients
 
+> All snippets below default to `http://127.0.0.1:49374` (local server). For a
+> remote server (homelab, LAN box) substitute the appropriate URL AND add an
+> `Authorization: Bearer <token>` header to the `headers` block when bearer auth
+> is enabled. The MCP wire protocol expects the `/mcp` path suffix on the URL.
+
 This page documents how to register ai-memory as an MCP server with
 the agent CLIs **that are not covered inline in the README**.
 

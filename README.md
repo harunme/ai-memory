@@ -96,6 +96,12 @@ overwrites them so future image updates ship updated hooks. Drop
 > `restart: unless-stopped`, a healthcheck, and the named volume
 > wired up; step 3 is identical.
 
+> **Server on a different machine?** Replace `-p 127.0.0.1:49374:49374` with
+> `-p 0.0.0.0:49374:49374` on the server's docker run; on the client, set
+> `export AI_MEMORY_SERVER_URL=http://<server-ip>:49374` and add
+> `--server-url <same>` to the install-mcp / install-hooks commands.
+> See [Security](#security) — anything non-loopback should also have a bearer token.
+
 ### Keeping ai-memory up to date
 
 The wrapper checks Docker Hub at most once every 24 hours and prints
@@ -119,6 +125,12 @@ wired up alone. Set `AI_MEMORY_NO_VERSION_CHECK=1` to silence the
 daily check, or `AI_MEMORY_WRAPPER_URL=<url>` to pin the self-upgrade
 source (e.g. a fork or a tagged release).
 
+> **If your server runs on a different host** (scenarios C/D), `ai-memory upgrade`
+> only refreshes the local wrapper, your local image, and your hook scripts. You
+> still need to redeploy the server separately — run `bin/deploy` on the homelab
+> box (or `docker compose pull && docker compose up -d` in your deploy dir) so
+> the server picks up the new binary too.
+
 > **Inside ai-jail (or any bwrap sandbox)?** The wrapper at
 > `~/.local/bin/ai-memory` works fine — the sandbox bind-mounts
 > `~/.local` read-only, so the script is visible from inside, and
@@ -134,34 +146,6 @@ needed), running ai-memory without docker, the full subcommand
 reference, the homelab deploy pattern, security hardening — see
 [**`docs/install.md`**](docs/install.md).
 
-## Configuring the CLI
-
-The `ai-memory` binary is a thin HTTP client. It never opens the
-wiki or SQLite directly — every state-touching command goes through
-the running server, which is the sole writer.
-
-Configuration is two environment variables, both **optional**:
-
-| Variable | Default | When to set it |
-|---|---|---|
-| `AI_MEMORY_SERVER_URL` | `http://127.0.0.1:49374` | When the server runs somewhere other than this machine (e.g. a homelab at `http://192.168.0.90:49374`). |
-| `AI_MEMORY_AUTH_TOKEN` | unset (no auth) | When the server has bearer auth enabled — see [Security](#security). |
-
-For the **single-laptop local case** you don't need either: the CLI
-talks to the loopback server with no credentials and just works.
-
-For a **remote / homelab** server, set both in your shell rc (or a
-`.envrc` if you use direnv):
-
-```bash
-export AI_MEMORY_SERVER_URL="http://192.168.0.90:49374"
-export AI_MEMORY_AUTH_TOKEN="b9a5075d…"
-```
-
-The `init`, `serve`, `install-*`, `generate-auth-token`, and
-`setup-agent` subcommands don't need these env vars — they either
-set up local files or start the server itself.
-
 ## Security
 
 The default Quick start runs **without authentication** because the
@@ -170,23 +154,24 @@ this machine can reach it. That's the safest default for a personal
 laptop and matches the "single-user, single-machine" use case the
 project is optimised for.
 
-You need to enable bearer authentication if **any of these are
-true:**
+### When you need bearer auth
 
-- The server is exposed beyond loopback (LAN, VPN, reverse proxy,
-  cloud).
+Enable bearer auth if **any** of these are true:
+
+- The server is exposed beyond loopback (LAN, VPN, reverse proxy, cloud).
 - More than one untrusted process runs on the same machine.
 - The data dir contains observations from sensitive projects you
   wouldn't want any local user to read.
 
-To enable it:
+### Enabling bearer auth (turn-key recipe)
 
 ```bash
 # 1. Generate a token (one-time; save the output somewhere).
 TOKEN=$(ai-memory generate-auth-token)
 echo "$TOKEN"   # 64 hex chars
 
-# 2. Pass it to the server on startup.
+# 2. Pass it to the server on startup. Note the bind is now 0.0.0.0
+#    so remote clients can reach it; only do this with a token set.
 docker run -d --name ai-memory \
     --restart unless-stopped \
     -p 0.0.0.0:49374:49374 \
@@ -201,22 +186,21 @@ docker run -d --name ai-memory \
 export AI_MEMORY_AUTH_TOKEN="$TOKEN"
 
 # 4. Re-run install-mcp / install-hooks so the agent configs pick
-#    up the new token + URL. The wrapper reads AI_MEMORY_AUTH_TOKEN
-#    from your env and embeds it in the generated config.
+#    up the new token + URL.
 ai-memory install-mcp   --client claude-code --apply \
-    --server-url "http://192.168.0.90:49374/mcp"
+    --server-url "http://192.168.0.90:49374/mcp" \
+    --auth-token "$TOKEN"
 ai-memory install-hooks --agent  claude-code --apply \
-    --server-url "http://192.168.0.90:49374"
+    --server-url "http://192.168.0.90:49374" \
+    --auth-token "$TOKEN"
 ```
 
 When the server has `AI_MEMORY_AUTH_TOKEN` set, every request to
 `/mcp`, `/hook`, `/handoff`, `/admin/*`, and `/web/*` must present
-the token. For HTTP clients (MCP, hooks, CLI) that means the
-`Authorization: Bearer <token>` header. For the `/web/*` browser
-flow it's HTTP Basic auth (the browser shows a native dialog;
-username is ignored, paste the token as the password). Constant-time
-token comparison via `subtle::ConstantTimeEq` rules out timing-based
-recovery.
+the token. HTTP clients (MCP, hooks, CLI) send an
+`Authorization: Bearer <token>` header; the `/web/*` browser flow
+uses HTTP Basic auth (see below). Token comparison uses
+`subtle::ConstantTimeEq` to rule out timing-based recovery.
 
 When the server has **no** `AI_MEMORY_AUTH_TOKEN` set AND binds to a
 non-loopback address, it logs a loud `warn` on startup. That's the
@@ -224,6 +208,70 @@ signal to either lock the bind back to `127.0.0.1` or set a token.
 
 See [`docs/deploy.md`](docs/deploy.md) for the full homelab pattern
 (bearer + TLS via cloudflared + reverse proxy).
+
+### DNS-rebinding guard (`AI_MEMORY_ALLOWED_HOSTS`)
+
+Any non-loopback bind also needs `AI_MEMORY_ALLOWED_HOSTS` set to the
+host/IP the clients will use, otherwise the rmcp server rejects
+external `Host` headers with 403:
+
+```bash
+-e AI_MEMORY_ALLOWED_HOSTS="<server-ip>,localhost,127.0.0.1"
+```
+
+Clients hitting the server by IP or hostname will be accepted;
+requests with an unrecognised `Host` are refused. This guards against
+DNS-rebinding attacks where a malicious page tricks the browser into
+sending requests to the server using a different hostname.
+
+### Browser access to `/web`
+
+When the server has **no** bearer token set, visit
+`http://<host>:49374/web` in any browser — no prompt.
+
+When `AI_MEMORY_AUTH_TOKEN` is set, the browser shows a native HTTP
+Basic dialog on first visit. Leave the username blank (or any value)
+and paste the token as the password. The server sets a cookie that
+persists for 30 days so subsequent navigation doesn't re-prompt.
+
+Browsers cannot pass a Bearer header in normal navigation, which is
+why the `/web` routes use HTTP Basic rather than Bearer. MCP and hook
+clients continue to use `Authorization: Bearer <token>`.
+
+## Configuring the CLI
+
+The `ai-memory` binary is a thin HTTP client. It never opens the
+wiki or SQLite directly — every state-touching command goes through
+the running server, which is the sole writer.
+
+Configuration is two environment variables, both **optional**:
+
+| Variable | Default | When to set it |
+|---|---|---|
+| `AI_MEMORY_SERVER_URL` | `http://127.0.0.1:49374` | When the server runs somewhere other than this machine (e.g. a homelab at `http://192.168.0.90:49374`). |
+| `AI_MEMORY_AUTH_TOKEN` | unset (no auth) | When the server has bearer auth enabled — see [Security](#security). |
+
+For the **single-laptop local case** (scenarios A/B) you don't need
+either env var: the CLI talks to the loopback server and just works.
+Scenario B (loopback + token) only requires `AI_MEMORY_AUTH_TOKEN` in
+the env.
+
+For a **remote / homelab** server (scenarios C/D), set both in your
+shell rc (or a `.envrc` if you use direnv):
+
+```bash
+export AI_MEMORY_SERVER_URL="http://192.168.0.90:49374"
+export AI_MEMORY_AUTH_TOKEN="b9a5075d…"   # only when server has auth enabled
+```
+
+Explicit flags (`--auth-token`, `--server-url`) on `install-mcp` /
+`install-hooks` override env vars when both are set — useful when
+you're generating configs for a client that talks to a different
+server than the CLI default.
+
+The `init`, `serve`, `install-*`, `generate-auth-token`, and
+`setup-agent` subcommands don't need these env vars — they either
+set up local files or start the server itself.
 
 ## How it works in practice
 
@@ -314,10 +362,12 @@ ai-memory serve --transport http --bind 127.0.0.1:49374 --enable-web
 ```
 
 The web routes are mounted at `/web` on the same axum server as the
-MCP endpoint, so the bearer-auth posture is identical (set
-`AI_MEMORY_AUTH_TOKEN` and pass `Authorization: Bearer …` from the
-browser, or front the server with a reverse proxy that handles its
-own auth, or keep the bind loopback-only).
+MCP endpoint. When the server has bearer auth enabled, the browser
+shows a native HTTP Basic dialog on first visit — leave the username
+blank (or any value) and paste the token as the password; the cookie
+persists for 30 days so subsequent navigation doesn't re-prompt.
+Loopback-bound servers with no token need no credentials at all. See
+[Security → Browser access to /web](#browser-access-to-web) above.
 
 ### Rules vs facts — ai-memory tells you when something belongs in CLAUDE.md
 
@@ -449,17 +499,8 @@ AI_MEMORY_LLM_MODEL=qwen3:32b
 LLM_API_KEY=ollama-local                  # any non-empty value; Ollama doesn't validate
 ```
 
-If you bind ai-memory to a non-loopback address so Claude
-Code on a different machine can reach it, also set:
-
-```bash
-AI_MEMORY_ALLOWED_HOSTS=<your-host-or-ip>,localhost,127.0.0.1
-```
-
-(Without this rmcp's DNS-rebinding guard rejects external
-`Host` headers with 403. See
-[`docs/llm-provider-comparison.md`](docs/llm-provider-comparison.md)
-for the discovery story.)
+If you bind ai-memory to a non-loopback address, also set
+`AI_MEMORY_ALLOWED_HOSTS` — see [Security → DNS-rebinding guard](#dns-rebinding-guard-ai_memory_allowed_hosts).
 
 ### What we don't recommend
 
@@ -536,7 +577,7 @@ data-flow diagram + crate breakdown + cross-cutting invariants.
 
 | File | What it is |
 |---|---|
-| [`docs/install.md`](docs/install.md) | **Installation cookbook.** Every agent CLI, every alternative (curl, source build, no-docker, no-auth). Read after the Quick start if your setup doesn't match the happy path. |
+| [`docs/install.md`](docs/install.md) | **Installation cookbook.** Every agent CLI, every alternative (curl, source build, no-docker, no-auth), and the server-on-a-different-machine (homelab/LAN) walkthrough. Read after the Quick start if your setup doesn't match the happy path. |
 | [`docs/mcp-install.md`](docs/mcp-install.md) | Per-client MCP config snippets (Cursor, Claude Desktop, Gemini CLI, OpenClaw, pi). |
 | [`docs/deploy.md`](docs/deploy.md) | Homelab deploy: bin/deploy, bearer-token auth, TLS via cloudflared. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Operational summary: data flow, crate layout, cross-cutting invariants, schema. |

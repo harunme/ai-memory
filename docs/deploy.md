@@ -139,10 +139,16 @@ alternatives:
 
 | Provider | Model | Approx. cost / consolidation | Notes |
 |---|---|---|---|
+| anthropic | `claude-haiku-4-5` | ~$0.02 | **Recommended default.** Best balance of speed, restraint, and classification quality. Not a reasoning model. |
 | openai-compat (OpenRouter) | `moonshotai/kimi-k2.6` | ~$0.013 | Reasoning model; latency ~2-3 min per consolidation. Fine because consolidation is fire-and-forget. |
-| anthropic | `claude-sonnet-4-6` | ~$0.02 | Faster (~15s), not a reasoning model. Smarter on average but more expensive. |
-| openai | `gpt-4o-mini` | ~$0.002 | Cheapest mainstream option. Decent quality. |
-| openai-compat (Ollama) | `qwen2.5-coder:14b` | $0 | Self-hosted. Set `AI_MEMORY_LLM_BASE_URL=http://host.docker.internal:11434/v1`. Quality depends on the model. |
+| openai | `gpt-5.4-mini` | ~$0.002 | Cheaper, faster alternative. Decent quality. |
+| openai-compat (Ollama) | `qwen3:32b` | $0 | Self-hosted. Set `AI_MEMORY_LLM_BASE_URL=http://host.docker.internal:11434/v1`. Quality depends on the model. |
+
+> **What we don't recommend:** reasoning-mode models (Kimi-K2.6 in reasoning mode,
+> Claude with extended thinking, GPT-o3, Gemini "thinking" variants) — they burn
+> token budget on internal reasoning before emitting output and hang or emit empty
+> responses with the strict-JSON consolidation prompt. If you must use one, turn
+> reasoning off.
 
 ai-memory's consolidator uses OpenAI's `json_schema` strict mode for
 structured output. Most modern models honour this, but if you switch
