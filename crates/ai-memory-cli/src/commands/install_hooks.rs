@@ -7,6 +7,7 @@
 //! `~/.claude/settings.json` automatically — agent CLI hook formats are
 //! still in flux and bad merges are very user-visible.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -89,7 +90,8 @@ fn apply_to_claude_code_settings(
             .join(".claude")
             .join("settings.json"),
     };
-    let payload = build_claude_code_payload(hooks_dir, server_url, auth_token);
+    let staged = stage_hook_scripts(hooks_dir, "claude-code")?;
+    let payload = build_claude_code_payload(&staged, server_url, auth_token);
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -161,10 +163,11 @@ fn apply_to_codex_settings(
             .join(".codex")
             .join("hooks.json"),
     };
+    let staged = stage_hook_scripts(hooks_dir, "codex")?;
     // Build the Codex-flavoured payload. The JSON shape is identical
     // to Claude Code's matcher + nested hooks form — only the event
     // list differs (no `SessionEnd`, which Codex doesn't recognise).
-    let payload = build_codex_payload(hooks_dir, server_url, auth_token);
+    let payload = build_codex_payload(&staged, server_url, auth_token);
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -245,7 +248,8 @@ fn apply_to_cursor_settings(
             .join(".cursor")
             .join("hooks.json"),
     };
-    let payload = build_profile_payload(&CURSOR_PROFILE, hooks_dir, server_url, auth_token);
+    let staged = stage_hook_scripts(hooks_dir, "cursor")?;
+    let payload = build_profile_payload(&CURSOR_PROFILE, &staged, server_url, auth_token);
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -310,7 +314,8 @@ fn apply_to_gemini_settings(
             .join(".gemini")
             .join("settings.json"),
     };
-    let payload = build_profile_payload(&GEMINI_PROFILE, hooks_dir, server_url, auth_token);
+    let staged = stage_hook_scripts(hooks_dir, "gemini-cli")?;
+    let payload = build_profile_payload(&GEMINI_PROFILE, &staged, server_url, auth_token);
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -380,8 +385,9 @@ fn apply_to_opencode_plugin(
             .join("plugins")
             .join("ai-memory.ts"),
     };
+    let staged = stage_hook_scripts(hooks_dir, "opencode")?;
     let script = |name: &str| {
-        hooks_dir
+        staged
             .join(name)
             .to_string_lossy()
             .into_owned()
@@ -512,6 +518,86 @@ fn render_agent(
     println!();
     println!("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.");
     Ok(())
+}
+
+/// Copy the bundled hook scripts to a stable user-global location
+/// and return that location. The path the agent's config file
+/// references is THIS path, not the source bundle's path.
+///
+/// Why this matters:
+///
+/// - **Project-portability.** The previous behaviour wrote the
+///   repo-relative path (e.g. `/mnt/data/Projects/ai-memory/hooks/
+///   claude-code/session-start.sh`) into the agent's settings.
+///   Any agent CLI started from a different project — or in a
+///   filesystem sandbox that didn't whitelist that path — failed
+///   the SessionStart hook with "No such file or directory".
+///
+/// - **Docker-image upgrades.** Users who installed via the docker
+///   image had paths under `/usr/local/share/ai-memory/hooks/`
+///   baked into their settings — paths only valid INSIDE the
+///   container. Staging copies the scripts OUT to the host's
+///   `~/.local/share/ai-memory/hooks/` so the host-side agent can
+///   actually reach them.
+///
+/// - **Updates.** When a new docker image ships with updated hook
+///   scripts, the user re-runs `install-hooks --apply` and the
+///   stage step overwrites the previous copies. No special
+///   `update-hooks` command, no version-tracking dance.
+///
+/// Errors propagate when source is missing, the staging dir
+/// can't be created, or any file copy fails.
+fn stage_hook_scripts(source_dir: &Path, agent_label: &str) -> Result<PathBuf> {
+    let dest_root = dirs::data_local_dir()
+        .context("could not locate the user data-local directory (e.g. ~/.local/share)")?
+        .join("ai-memory")
+        .join("hooks")
+        .join(agent_label);
+
+    fs::create_dir_all(&dest_root)
+        .with_context(|| format!("creating staging dir {}", dest_root.display()))?;
+
+    // Wipe any previously-staged scripts that the current bundle
+    // no longer ships. Idempotent re-runs against an old install
+    // shouldn't leave stale entries pointed at by nothing.
+    if let Ok(entries) = fs::read_dir(&dest_root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().is_some_and(|e| e == "sh") {
+                fs::remove_file(&p).ok();
+            }
+        }
+    }
+
+    let mut copied = 0_usize;
+    for entry in fs::read_dir(source_dir)
+        .with_context(|| format!("reading source bundle {}", source_dir.display()))?
+    {
+        let entry = entry?;
+        let from = entry.path();
+        if !from.is_file() || from.extension().and_then(|s| s.to_str()) != Some("sh") {
+            continue;
+        }
+        let to = dest_root.join(from.file_name().context("bad source file name")?);
+        fs::copy(&from, &to)
+            .with_context(|| format!("copying {} → {}", from.display(), to.display()))?;
+        // Preserve the executable bit — the scripts need to be
+        // directly invokable by the agent's hook runner.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&to)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&to, perms)?;
+        }
+        copied += 1;
+    }
+
+    eprintln!(
+        "✓ staged {copied} hook script(s) → {}",
+        dest_root.display()
+    );
+    Ok(dest_root)
 }
 
 fn resolve_hooks_dir(explicit: Option<&Path>, agent: AgentChoice) -> Result<PathBuf> {
