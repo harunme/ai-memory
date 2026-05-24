@@ -24,7 +24,7 @@ use std::io::Write;
 
 use ai_memory_core::{ProjectId, WorkspaceId};
 use ai_memory_wiki::Wiki;
-use jiff::{Timestamp, ToSpan, tz::TimeZone};
+use jiff::{Timestamp, tz::TimeZone};
 use tracing::debug;
 
 use crate::payload::HookEvent;
@@ -100,11 +100,6 @@ fn format_line(when: Timestamp, event: HookEvent, title: &str) -> String {
         .take(120)
         .collect();
     format!("## [{stamp}] {kind} | {one_line}\n")
-}
-
-#[allow(dead_code)] // Helper kept for parity with the original Karpathy CLAUDE.md grep pattern.
-fn now() -> Timestamp {
-    Timestamp::now() - 0.seconds()
 }
 
 #[cfg(test)]

@@ -1029,84 +1029,13 @@ impl ReaderPool {
                      JOIN projects p ON p.id = pg.project_id \
                      JOIN workspaces w ON w.id = pg.workspace_id \
                      LEFT JOIN pages sp ON sp.id = pg.supersedes \
-                     WHERE pg.path = ?1 AND pg.is_latest = 1 \
-                     LIMIT 1",
+                      WHERE pg.path = ?1 AND pg.is_latest = 1 \
+                      LIMIT 1",
                     params![path],
-                    |row| {
-                        let workspace_name: String = row.get(0)?;
-                        let project_name: String = row.get(1)?;
-                        let ws_id_bytes: Vec<u8> = row.get(2)?;
-                        let proj_id_bytes: Vec<u8> = row.get(3)?;
-                        let path: String = row.get(4)?;
-                        let title: String = row.get(5)?;
-                        let kind: String = row.get(6)?;
-                        let tier: String = row.get(7)?;
-                        let pinned: i64 = row.get(8)?;
-                        let created_us: i64 = row.get(9)?;
-                        let updated_us: i64 = row.get(10)?;
-                        let supersedes_path: Option<String> = row.get(11)?;
-                        Ok((
-                            workspace_name,
-                            project_name,
-                            ws_id_bytes,
-                            proj_id_bytes,
-                            path,
-                            title,
-                            kind,
-                            tier,
-                            pinned,
-                            created_us,
-                            updated_us,
-                            supersedes_path,
-                        ))
-                    },
+                    page_meta_from_row,
                 )
                 .optional()?;
-
-            let Some((
-                workspace_name,
-                project_name,
-                ws_id_bytes,
-                proj_id_bytes,
-                path,
-                title,
-                kind,
-                tier,
-                pinned,
-                created_us,
-                updated_us,
-                supersedes,
-            )) = row_opt
-            else {
-                return Ok(None);
-            };
-
-            let workspace_id = WorkspaceId::from_slice(&ws_id_bytes)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, 0))?;
-            let project_id = ProjectId::from_slice(&proj_id_bytes)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, 0))?;
-
-            let created_at = jiff::Timestamp::from_microsecond(created_us)
-                .map(|ts| ts.to_string())
-                .unwrap_or_default();
-            let updated_at = jiff::Timestamp::from_microsecond(updated_us)
-                .map(|ts| ts.to_string())
-                .unwrap_or_default();
-
-            Ok(Some(PageMeta {
-                workspace_name,
-                project_name,
-                workspace_id,
-                project_id,
-                path,
-                title,
-                kind,
-                tier,
-                pinned: pinned != 0,
-                created_at,
-                updated_at,
-                supersedes,
-            }))
+            row_opt.transpose()
         })
         .await
     }
@@ -1232,84 +1161,13 @@ impl ReaderPool {
                      FROM pages pg \
                      JOIN projects p ON p.id = pg.project_id \
                      JOIN workspaces w ON w.id = pg.workspace_id \
-                     LEFT JOIN pages sp ON sp.id = pg.supersedes \
-                     WHERE w.name = ?1 AND p.name = ?2 AND pg.path = ?3 AND pg.is_latest = 1",
+                      LEFT JOIN pages sp ON sp.id = pg.supersedes \
+                      WHERE w.name = ?1 AND p.name = ?2 AND pg.path = ?3 AND pg.is_latest = 1",
                     params![workspace, project, page_path],
-                    |row| {
-                        let workspace_name: String = row.get(0)?;
-                        let project_name: String = row.get(1)?;
-                        let ws_id_bytes: Vec<u8> = row.get(2)?;
-                        let proj_id_bytes: Vec<u8> = row.get(3)?;
-                        let path: String = row.get(4)?;
-                        let title: String = row.get(5)?;
-                        let kind: String = row.get(6)?;
-                        let tier: String = row.get(7)?;
-                        let pinned: i64 = row.get(8)?;
-                        let created_us: i64 = row.get(9)?;
-                        let updated_us: i64 = row.get(10)?;
-                        let supersedes_path: Option<String> = row.get(11)?;
-                        Ok((
-                            workspace_name,
-                            project_name,
-                            ws_id_bytes,
-                            proj_id_bytes,
-                            path,
-                            title,
-                            kind,
-                            tier,
-                            pinned,
-                            created_us,
-                            updated_us,
-                            supersedes_path,
-                        ))
-                    },
+                    page_meta_from_row,
                 )
                 .optional()?;
-
-            let Some((
-                workspace_name,
-                project_name,
-                ws_id_bytes,
-                proj_id_bytes,
-                path,
-                title,
-                kind,
-                tier,
-                pinned,
-                created_us,
-                updated_us,
-                supersedes,
-            )) = row_opt
-            else {
-                return Ok(None);
-            };
-
-            let workspace_id = WorkspaceId::from_slice(&ws_id_bytes)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, 0))?;
-            let project_id = ProjectId::from_slice(&proj_id_bytes)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, 0))?;
-
-            let created_at = jiff::Timestamp::from_microsecond(created_us)
-                .map(|ts| ts.to_string())
-                .unwrap_or_default();
-            let updated_at = jiff::Timestamp::from_microsecond(updated_us)
-                .map(|ts| ts.to_string())
-                .unwrap_or_default();
-
-            Ok(Some(PageMeta {
-                workspace_name,
-                project_name,
-                workspace_id,
-                project_id,
-                path,
-                title,
-                kind,
-                tier,
-                pinned: pinned != 0,
-                created_at,
-                updated_at,
-                supersedes,
-            }))
+            row_opt.transpose()
         })
         .await
     }

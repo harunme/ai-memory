@@ -305,7 +305,7 @@ impl Bootstrap {
         }
 
         let collected = sources.len();
-        let (kept, dropped, est_tokens) = prune_to_budget(sources, cfg.max_input_tokens);
+        let (kept, dropped, est_tokens) = prune_sources_to_budget(sources, cfg.max_input_tokens);
         info!(
             collected,
             kept = kept.len(),
@@ -719,7 +719,7 @@ fn collect_project_rules(repo_path: &Path) -> Result<Vec<BootstrapSource>, Boots
 
 /// Drop lower-priority sources until estimated tokens fit under the
 /// budget. Returns (kept, dropped_count, estimated_total_tokens).
-fn prune_to_budget(
+pub fn prune_sources_to_budget(
     mut sources: Vec<BootstrapSource>,
     budget: usize,
 ) -> (Vec<BootstrapSource>, usize, usize) {
@@ -948,7 +948,7 @@ mod tests {
             label: "README".into(),
             text: "important".to_string(),
         };
-        let (kept, dropped, _) = prune_to_budget(vec![big_header, readme], 1_500);
+        let (kept, dropped, _) = prune_sources_to_budget(vec![big_header, readme], 1_500);
         assert_eq!(dropped, 1);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].kind, SourceKind::Readme);
@@ -966,7 +966,7 @@ mod tests {
             label: "r".into(),
             text: "shorter".into(),
         };
-        let (kept, dropped, _) = prune_to_budget(vec![s1, s2], 50_000);
+        let (kept, dropped, _) = prune_sources_to_budget(vec![s1, s2], 50_000);
         assert_eq!(dropped, 0);
         assert_eq!(kept.len(), 2);
     }

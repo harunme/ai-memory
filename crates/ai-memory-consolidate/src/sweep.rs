@@ -81,13 +81,8 @@ pub async fn run_sweep(
         if !is_decayable(c) {
             continue;
         }
-        #[allow(clippy::cast_precision_loss)]
-        let age_days = (now_us - c.updated_at_us) as f64 / US_PER_DAY;
-        let days_since_access = c.last_accessed_at_us.map(|us| {
-            #[allow(clippy::cast_precision_loss)]
-            let raw = (now_us - us) as f64 / US_PER_DAY;
-            raw.max(0.0)
-        });
+        let age_days = elapsed_days(now_us, c.updated_at_us);
+        let days_since_access = c.last_accessed_at_us.map(|us| elapsed_days(now_us, us));
         let score = retention_score(params, age_days, c.access_count, days_since_access);
         if score < params.cold_threshold {
             evicted.push(EvictedPage {
@@ -117,6 +112,12 @@ pub async fn run_sweep(
         evicted,
         hard_deleted,
     })
+}
+
+fn elapsed_days(now_us: i64, then_us: i64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let raw = (now_us - then_us) as f64 / US_PER_DAY;
+    raw.max(0.0)
 }
 
 fn is_decayable(c: &DecayCandidate) -> bool {
@@ -196,5 +197,11 @@ mod tests {
             frontmatter_json: "{}".into(),
         };
         assert!(is_decayable(&c));
+    }
+
+    #[test]
+    fn elapsed_days_clamps_future_timestamps() {
+        assert_eq!(elapsed_days(1_000, 2_000), 0.0);
+        assert!(elapsed_days(US_PER_DAY as i64, 0) >= 1.0);
     }
 }

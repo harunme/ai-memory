@@ -38,74 +38,6 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
 }
 
-/// Build a [`ProviderConfig`] from the environment.
-///
-/// Reads `AI_MEMORY_LLM_PROVIDER`, `AI_MEMORY_LLM_MODEL`,
-/// `AI_MEMORY_LLM_BASE_URL`, and the appropriate API key
-/// (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `LLM_API_KEY`).
-/// Returns `Ok(None)` when `AI_MEMORY_LLM_PROVIDER` is unset — that
-/// is the canonical "no LLM features" path.
-///
-/// # Errors
-/// Returns [`LlmError::NotConfigured`] when the provider env var is
-/// set to an unknown value or when the model env var is missing.
-pub fn provider_from_env() -> LlmResult<Option<ProviderConfig>> {
-    let provider = match std::env::var("AI_MEMORY_LLM_PROVIDER") {
-        Ok(s) => match s.as_str() {
-            "anthropic" => ProviderChoice::Anthropic,
-            "openai" => ProviderChoice::OpenAi,
-            "openai-compat" | "openai_compat" => ProviderChoice::OpenAiCompat,
-            other => {
-                return Err(LlmError::NotConfigured(format!(
-                    "AI_MEMORY_LLM_PROVIDER={other} is not one of anthropic|openai|openai-compat"
-                )));
-            }
-        },
-        Err(_) => return Ok(None),
-    };
-    // Sensible defaults per provider so the operator can set just the
-    // provider env var and get a reasonable model. Override via
-    // `AI_MEMORY_LLM_MODEL`. We pick the cheapest model that is still
-    // smart enough to summarise a session into a coherent wiki page;
-    // reasoning models are deliberately avoided in the defaults
-    // because consolidation runs frequently and silently.
-    let model = match std::env::var("AI_MEMORY_LLM_MODEL") {
-        Ok(s) if !s.is_empty() => s,
-        _ => match provider {
-            ProviderChoice::Anthropic => "claude-sonnet-4-6".to_string(),
-            ProviderChoice::OpenAi => "gpt-4o-mini".to_string(),
-            // openai-compat covers Ollama / vLLM / LM Studio / OpenRouter.
-            // What's available depends entirely on the user's setup, so
-            // refuse to start without an explicit choice.
-            ProviderChoice::OpenAiCompat => {
-                return Err(LlmError::NotConfigured(
-                    "AI_MEMORY_LLM_MODEL must be set explicitly for openai-compat \
-                     (no safe default for self-hosted / aggregator endpoints)"
-                        .into(),
-                ));
-            }
-        },
-    };
-    let base_url = std::env::var("AI_MEMORY_LLM_BASE_URL").ok();
-    let api_key = match provider {
-        ProviderChoice::Anthropic => std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(secrecy::SecretString::from),
-        ProviderChoice::OpenAi => std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(secrecy::SecretString::from),
-        ProviderChoice::OpenAiCompat => std::env::var("LLM_API_KEY")
-            .ok()
-            .map(secrecy::SecretString::from),
-    };
-    Ok(Some(ProviderConfig {
-        provider,
-        model,
-        api_key,
-        base_url,
-    }))
-}
-
 /// Three embedders ship in v0.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedderChoice {
@@ -167,68 +99,11 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
     Ok(arc)
 }
 
-/// Read an `EmbedderConfig` from the environment.
-///
-/// Honours `AI_MEMORY_EMBEDDING_PROVIDER` (`openai` / `voyage`),
-/// `AI_MEMORY_EMBEDDING_MODEL`, `AI_MEMORY_EMBEDDING_DIM`,
-/// `AI_MEMORY_EMBEDDING_BASE_URL` (optional), and the appropriate
-/// API key env (`OPENAI_API_KEY` / `VOYAGE_API_KEY`).
-///
-/// Returns `Ok(None)` when `AI_MEMORY_EMBEDDING_PROVIDER` is unset —
-/// the canonical "no embeddings, FTS5 only" path.
-///
-/// # Errors
-/// Returns [`LlmError::NotConfigured`] when the provider value is
-/// unrecognised or when required env vars are missing.
-pub fn embedder_from_env() -> LlmResult<Option<EmbedderConfig>> {
-    let provider = match std::env::var("AI_MEMORY_EMBEDDING_PROVIDER") {
-        Ok(s) => match s.as_str() {
-            "openai" => EmbedderChoice::OpenAi,
-            "voyage" => EmbedderChoice::Voyage,
-            other => {
-                return Err(LlmError::NotConfigured(format!(
-                    "AI_MEMORY_EMBEDDING_PROVIDER={other} not one of openai|voyage"
-                )));
-            }
-        },
-        Err(_) => return Ok(None),
-    };
-    // Recommended embedder defaults; override via env. text-embedding-3-small
-    // is the price/quality sweet spot for OpenAI; voyage-3 is Voyage's
-    // current general-purpose model. Dim follows model when defaulted.
-    let model = match std::env::var("AI_MEMORY_EMBEDDING_MODEL") {
-        Ok(s) if !s.is_empty() => s,
-        _ => match provider {
-            EmbedderChoice::OpenAi => "text-embedding-3-small".to_string(),
-            EmbedderChoice::Voyage => "voyage-3".to_string(),
-        },
-    };
-    let dim: u32 = match std::env::var("AI_MEMORY_EMBEDDING_DIM") {
-        Ok(s) if !s.is_empty() => s
-            .parse()
-            .map_err(|e| LlmError::NotConfigured(format!("AI_MEMORY_EMBEDDING_DIM: {e}")))?,
-        _ => default_embedding_dim(provider, &model),
-    };
-    let base_url = std::env::var("AI_MEMORY_EMBEDDING_BASE_URL").ok();
-    let api_key = match provider {
-        EmbedderChoice::OpenAi => std::env::var("OPENAI_API_KEY")
-            .map_err(|_| LlmError::NotConfigured("OPENAI_API_KEY".into()))?,
-        EmbedderChoice::Voyage => std::env::var("VOYAGE_API_KEY")
-            .map_err(|_| LlmError::NotConfigured("VOYAGE_API_KEY".into()))?,
-    };
-    Ok(Some(EmbedderConfig {
-        provider,
-        model,
-        dim,
-        api_key: SecretString::from(api_key),
-        base_url,
-    }))
-}
-
 /// Default dim for known embedding models. Used when the operator
 /// omits `AI_MEMORY_EMBEDDING_DIM`. Falls back to a model-family
 /// default; unknown models still require an explicit dim.
-fn default_embedding_dim(provider: EmbedderChoice, model: &str) -> u32 {
+#[must_use]
+pub fn default_embedding_dim(provider: EmbedderChoice, model: &str) -> u32 {
     match (provider, model) {
         (EmbedderChoice::OpenAi, "text-embedding-3-small") => 1536,
         (EmbedderChoice::OpenAi, "text-embedding-3-large") => 3072,

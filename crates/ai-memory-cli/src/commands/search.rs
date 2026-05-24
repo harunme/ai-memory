@@ -23,9 +23,9 @@ struct Hit {
 ///
 /// # Errors
 /// Returns an error if the server is unreachable or returns non-2xx.
-pub async fn run(_config: &Config, args: SearchArgs) -> Result<()> {
-    let ep = ServerEndpoint::from_env();
-    let project = super::resolve_project_name(args.project.as_deref())?;
+pub async fn run(config: &Config, args: SearchArgs) -> Result<()> {
+    let ep = ServerEndpoint::from_config(config);
+    let project = super::resolve_project_name(config, args.project.as_deref())?;
     let limit_str = args.limit.to_string();
     let hits: Vec<Hit> = get_json(
         &ep,

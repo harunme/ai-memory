@@ -114,6 +114,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_bom_prefixed_frontmatter() {
+        let src = "\u{FEFF}---\ntitle: Hello\n---\nBody\n";
+        let md = parse(src).unwrap();
+        assert_eq!(md.frontmatter["title"], "Hello");
+        assert_eq!(md.body, "Body\n");
+    }
+
+    #[test]
+    fn malformed_frontmatter_returns_error() {
+        let src = "---\ntitle: [unterminated\n---\nBody\n";
+        assert!(parse(src).is_err());
+    }
+
+    #[test]
+    fn unterminated_frontmatter_marker_is_body() {
+        let src = "---\ntitle: Hello\nBody\n";
+        let md = parse(src).unwrap();
+        assert!(md.frontmatter.is_null());
+        assert_eq!(md.body, src);
+    }
+
+    #[test]
     fn parses_body_without_frontmatter() {
         let src = "Just a body, no frontmatter.\n";
         let md = parse(src).unwrap();

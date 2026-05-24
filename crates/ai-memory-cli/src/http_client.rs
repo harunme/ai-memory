@@ -6,17 +6,15 @@
 //!
 //! ## Configuration
 //!
-//! Two environment variables drive the client:
-//!
-//! - `AI_MEMORY_SERVER_URL` — base URL. Defaults to
-//!   `http://127.0.0.1:49374` for the single-laptop case.
-//! - `AI_MEMORY_AUTH_TOKEN` — bearer token. Optional; only sent when
-//!   non-empty. A loopback server with no token set accepts every
-//!   request, so the default flow needs no credentials at all.
+//! [`crate::config::Config`] captures `AI_MEMORY_SERVER_URL` and
+//! `AI_MEMORY_AUTH_TOKEN` exactly once; this module only consumes the
+//! resolved values.
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+use crate::config::{Config, DEFAULT_SERVER_URL};
 
 /// Resolved server target — base URL + optional bearer token.
 #[derive(Debug, Clone)]
@@ -26,17 +24,17 @@ pub struct ServerEndpoint {
     pub url: String,
     /// Bearer token when present, else `None`.
     pub auth_token: Option<String>,
+    url_configured: bool,
 }
 
 impl ServerEndpoint {
-    /// Read the endpoint from `AI_MEMORY_SERVER_URL` +
-    /// `AI_MEMORY_AUTH_TOKEN`. Both are optional; the URL defaults to
-    /// loopback, the token defaults to unset.
+    /// Build the endpoint from the already-loaded process config.
     #[must_use]
-    pub fn from_env() -> Self {
-        Self::from_pair(
-            std::env::var("AI_MEMORY_SERVER_URL").ok(),
-            std::env::var("AI_MEMORY_AUTH_TOKEN").ok(),
+    pub fn from_config(config: &Config) -> Self {
+        Self::from_pair_with_configured(
+            Some(config.server_url.clone()),
+            config.auth.bearer_token.clone(),
+            config.server_url_configured(),
         )
     }
 
@@ -47,14 +45,28 @@ impl ServerEndpoint {
     /// trailing slashes are stripped. `token` is treated as absent when
     /// `None` or empty.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn from_pair(url: Option<String>, token: Option<String>) -> Self {
+        let url_configured = url.as_deref().is_some_and(|s| !s.is_empty());
+        Self::from_pair_with_configured(url, token, url_configured)
+    }
+
+    fn from_pair_with_configured(
+        url: Option<String>,
+        token: Option<String>,
+        url_configured: bool,
+    ) -> Self {
         let url = url
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "http://127.0.0.1:49374".to_string())
+            .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
             .trim_end_matches('/')
             .to_string();
         let auth_token = token.filter(|s| !s.is_empty());
-        Self { url, auth_token }
+        Self {
+            url,
+            auth_token,
+            url_configured,
+        }
     }
 
     /// Apply auth header to a `reqwest::RequestBuilder` if a token is set.
@@ -124,10 +136,9 @@ pub async fn post_json<B: Serialize, T: DeserializeOwned>(
 }
 
 /// Turn a low-level reqwest connect/timeout error into a friendlier
-/// message that surfaces the env-var configuration. The common case
-/// is "Connection refused" — typically because `AI_MEMORY_SERVER_URL`
-/// is unset and the CLI defaulted to loopback on a host that has no
-/// local server running.
+/// message that surfaces the resolved server URL. The common case is
+/// "Connection refused" — typically because the CLI defaulted to
+/// loopback on a host that has no local server running.
 fn augment_connect_error(
     err: reqwest::Error,
     endpoint: &ServerEndpoint,
@@ -150,10 +161,8 @@ fn augment_connect_error(
         found
     };
 
-    let url_from_env = std::env::var("AI_MEMORY_SERVER_URL").is_ok_and(|v| !v.is_empty());
-
     if chain_contains_refused {
-        let hint = if url_from_env {
+        let hint = if endpoint.url_configured {
             format!(
                 "\nAI_MEMORY_SERVER_URL is set to {} but nothing answered. \
                  Check the server is running, the port is reachable from \

@@ -49,12 +49,16 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         auth_token: args.auth_token.or_else(|| config.auth.bearer_token.clone()),
         ..args
     };
+    if matches!(args.agent, AgentChoice::OpenCode) {
+        emit_opencode_setup_hint(&args);
+        return Ok(());
+    }
     let agent_sub = match args.agent {
         AgentChoice::ClaudeCode => "claude-code",
         AgentChoice::Codex => "codex",
         AgentChoice::Cursor => "cursor",
         AgentChoice::GeminiCli => "gemini-cli",
-        AgentChoice::OpenCode => "opencode",
+        AgentChoice::OpenCode => unreachable!("opencode handled above"),
         AgentChoice::Openclaw => {
             anyhow::bail!(
                 "OpenClaw has no lifecycle hooks (only HTTP webhooks); \
@@ -115,12 +119,10 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
 
     match args.agent {
         AgentChoice::ClaudeCode => emit_claude_code(&emit_root, &args)?,
-        AgentChoice::Codex
-        | AgentChoice::Cursor
-        | AgentChoice::GeminiCli
-        | AgentChoice::OpenCode => {
+        AgentChoice::Codex | AgentChoice::Cursor | AgentChoice::GeminiCli => {
             emit_other(&emit_root, agent_sub, &args);
         }
+        AgentChoice::OpenCode => unreachable!("opencode handled above"),
         AgentChoice::Openclaw => {
             // Unreachable — the early bail at the top of run()
             // catches openclaw before we get here. Defensive
@@ -130,6 +132,21 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn emit_opencode_setup_hint(args: &SetupAgentArgs) {
+    println!("# OpenCode uses a TypeScript plugin, not extracted shell scripts.");
+    println!("# Install it directly instead:");
+    println!("ai-memory install-hooks --agent opencode --apply \\");
+    if args.auth_token.is_some() {
+        println!("  --server-url {} \\", args.server_url);
+        println!("  --auth-token <token>");
+    } else {
+        println!("  --server-url {}", args.server_url);
+        println!("  # add --auth-token <token> if the server requires bearer auth");
+    }
+    println!();
+    println!("Also run `ai-memory install-mcp --client opencode` to wire MCP separately.");
 }
 
 fn emit_claude_code(emit_root: &Path, args: &SetupAgentArgs) -> Result<()> {
@@ -153,11 +170,10 @@ fn emit_claude_code(emit_root: &Path, args: &SetupAgentArgs) -> Result<()> {
 }
 
 fn emit_other(emit_root: &Path, label: &str, args: &SetupAgentArgs) {
-    // Codex + OpenCode hook configs vary by version; we just point at
-    // the extracted scripts and let the user wire them up. Future
-    // versions can render structured JSON/TOML once those formats
-    // settle upstream.
-    println!("# {label} hook scripts (manual wire-up — formats still evolving upstream)");
+    // These clients have hook surfaces, but their print-mode config
+    // snippets are intentionally conservative: apply-mode owns the
+    // exact merge/plugin generation where ai-memory knows the format.
+    println!("# {label} hook scripts (manual wire-up; use install-hooks --apply when available)");
     println!("# Scripts located at: {}", emit_root.display());
     println!("# Server URL:         {}", args.server_url);
     if args.auth_token.is_some() {

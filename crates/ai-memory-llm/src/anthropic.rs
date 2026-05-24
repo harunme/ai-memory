@@ -10,6 +10,7 @@ use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
 use crate::provider::LlmProvider;
+use crate::text::truncate_with_ellipsis;
 use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 
 /// Default Anthropic API base.
@@ -99,16 +100,8 @@ struct AnthropicResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContent {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        #[allow(dead_code)]
-        id: String,
-        #[allow(dead_code)]
-        name: String,
-        input: serde_json::Value,
-    },
+    Text { text: String },
+    ToolUse { input: serde_json::Value },
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,17 +223,9 @@ impl AnthropicProvider {
             let body = resp.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate(&body, 1024),
+                body: truncate_with_ellipsis(&body, 1024),
             });
         }
         resp.json::<R>().await.map_err(LlmError::from)
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
     }
 }

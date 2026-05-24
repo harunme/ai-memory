@@ -8,22 +8,39 @@
 
 use std::path::{Path, PathBuf};
 
+use ai_memory_llm::{
+    EmbedderChoice, EmbedderConfig, LlmError, LlmResult, ProviderChoice, ProviderConfig,
+};
 use anyhow::{Context, Result};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+
+/// Default HTTP bind address for the local single-user server.
+pub const DEFAULT_BIND: &str = "127.0.0.1:49374";
+
+/// Default base URL used by thin-client CLI subcommands.
+pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49374";
+
+/// Default MCP endpoint URL rendered for client integrations.
+pub const DEFAULT_MCP_URL: &str = "http://127.0.0.1:49374/mcp";
+
+/// Default workspace name used by the single-workspace v1 flow.
+pub const DEFAULT_WORKSPACE: &str = ai_memory_core::DEFAULT_WORKSPACE_NAME;
+
+/// Defensive project fallback used only when no cwd/project is available.
+pub const DEFAULT_PROJECT: &str = ai_memory_core::DEFAULT_PROJECT_NAME;
 
 /// Top-level runtime configuration.
 ///
 /// `deny_unknown_fields` is intentionally NOT set: figment's
 /// `Env::prefixed("AI_MEMORY_")` pulls every env var with that prefix
-/// (including ones meant for the LLM/embedding factory:
-/// `AI_MEMORY_LLM_MODEL`, `AI_MEMORY_EMBEDDING_DIM`, …). Those keys are
-/// read directly via `std::env::var` in their own modules; they don't
-/// map into `Config` fields, but figment doesn't know that. Strict
-/// rejection here would crash on every deploy that uses LLM env vars.
+/// (including future keys not represented here yet). Strict rejection
+/// here would crash on harmless deploy-specific env vars before the
+/// rest of the config has a chance to validate what it actually uses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -31,8 +48,24 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// HTTP bind address used by `ai-memory serve`.
     pub bind: String,
+    /// Base URL used by thin-client CLI commands to contact the running server.
+    pub server_url: String,
     /// Per-subsystem log filter (overridable by `RUST_LOG`).
     pub log_level: String,
+    /// Optional LLM provider (`anthropic`, `openai`, `openai-compat`).
+    pub llm_provider: Option<String>,
+    /// Optional LLM model override.
+    pub llm_model: Option<String>,
+    /// Optional LLM base URL override.
+    pub llm_base_url: Option<String>,
+    /// Optional embedding provider (`openai`, `voyage`).
+    pub embedding_provider: Option<String>,
+    /// Optional embedding model override.
+    pub embedding_model: Option<String>,
+    /// Optional embedding dimension override.
+    pub embedding_dim: Option<u32>,
+    /// Optional embedding base URL override.
+    pub embedding_base_url: Option<String>,
     /// M8 retention-sweep parameters. The defaults give an ~80-day
     /// "survival floor" for unused episodic content (above the cold
     /// threshold), followed by ~180 days of soft-delete buffer before
@@ -61,6 +94,53 @@ pub struct Config {
     /// can't be sequences without ugly escaping.
     #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub allowed_hosts: Vec<String>,
+    /// Process-only env values that should never be written to config files.
+    #[serde(skip)]
+    pub runtime_env: RuntimeEnv,
+}
+
+/// Environment-only values captured once by [`Config::load`].
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeEnv {
+    data_dir: Option<PathBuf>,
+    server_url: Option<String>,
+    auth_token: Option<String>,
+    host_cwd: Option<String>,
+    anthropic_api_key: Option<SecretString>,
+    openai_api_key: Option<SecretString>,
+    llm_api_key: Option<SecretString>,
+    llm_base_url: Option<String>,
+    voyage_api_key: Option<SecretString>,
+}
+
+impl RuntimeEnv {
+    fn from_process() -> Self {
+        Self {
+            data_dir: env_path("AI_MEMORY_DATA_DIR"),
+            server_url: env_string("AI_MEMORY_SERVER_URL"),
+            auth_token: env_string("AI_MEMORY_AUTH_TOKEN"),
+            host_cwd: env_string("AI_MEMORY_HOST_CWD"),
+            anthropic_api_key: env_secret("ANTHROPIC_API_KEY"),
+            openai_api_key: env_secret("OPENAI_API_KEY"),
+            llm_api_key: env_secret("LLM_API_KEY"),
+            llm_base_url: env_string("LLM_BASE_URL"),
+            voyage_api_key: env_secret("VOYAGE_API_KEY"),
+        }
+    }
+
+    /// Host cwd forwarded by the docker wrapper, if present.
+    #[must_use]
+    pub fn host_cwd(&self) -> Option<&str> {
+        self.host_cwd.as_deref()
+    }
+
+    #[cfg(test)]
+    pub fn with_host_cwd_for_tests(host_cwd: impl Into<String>) -> Self {
+        Self {
+            host_cwd: Some(host_cwd.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// Accept `Vec<String>` either as a real sequence (config.toml /
@@ -99,12 +179,21 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
-            bind: "127.0.0.1:49374".into(),
+            bind: DEFAULT_BIND.into(),
+            server_url: DEFAULT_SERVER_URL.into(),
             log_level: "info".into(),
+            llm_provider: None,
+            llm_model: None,
+            llm_base_url: None,
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_dim: None,
+            embedding_base_url: None,
             decay: ai_memory_store::DecayParams::default(),
             sanitize: ai_memory_core::SanitizeConfig::default(),
             auth: AuthSettings::default(),
             allowed_hosts: vec!["localhost".into(), "127.0.0.1".into(), "::1".into()],
+            runtime_env: RuntimeEnv::default(),
         }
     }
 }
@@ -116,9 +205,14 @@ impl Config {
     /// Returns an error if the config file is malformed or any required
     /// field is missing.
     pub fn load(config_path: Option<&Path>, cli_data_dir: Option<PathBuf>) -> Result<Self> {
+        let runtime_env = RuntimeEnv::from_process();
+
         // Figure out where the config file *would* live so we can read it
         // before knowing the final data dir. CLI > env > default.
-        let probe_data_dir = cli_data_dir.clone().unwrap_or_else(default_data_dir);
+        let probe_data_dir = cli_data_dir
+            .clone()
+            .or_else(|| runtime_env.data_dir.clone())
+            .unwrap_or_else(default_data_dir);
         let resolved_config_path = config_path
             .map(PathBuf::from)
             .unwrap_or_else(|| probe_data_dir.join("config.toml"));
@@ -136,16 +230,163 @@ impl Config {
             )
         })?;
 
+        if let Some(token) = runtime_env.auth_token.clone() {
+            config.auth.bearer_token = Some(token);
+        }
+        if let Some(server_url) = runtime_env.server_url.clone() {
+            config.server_url = server_url;
+        }
+
         // CLI override always wins (figment doesn't see it because clap has
-        // already consumed the env var into `cli_data_dir`).
+        // already parsed the flag into `cli_data_dir`).
         if let Some(dir) = cli_data_dir {
+            config.data_dir = dir;
+        } else if let Some(dir) = runtime_env.data_dir.clone() {
             config.data_dir = dir;
         }
 
         config.data_dir = canonicalise_or_keep(&config.data_dir);
+        config.runtime_env = runtime_env;
 
         Ok(config)
     }
+
+    /// Whether the server URL came from config/env instead of the default.
+    #[must_use]
+    pub fn server_url_configured(&self) -> bool {
+        self.server_url != DEFAULT_SERVER_URL || self.runtime_env.server_url.is_some()
+    }
+
+    /// Build the configured LLM provider settings, if LLM support is enabled.
+    ///
+    /// # Errors
+    /// Returns [`LlmError::NotConfigured`] for unknown providers or missing
+    /// provider-specific required values.
+    pub fn llm_provider_config(&self) -> LlmResult<Option<ProviderConfig>> {
+        let Some(provider_raw) = non_empty(self.llm_provider.as_deref()) else {
+            return Ok(None);
+        };
+        let provider = match provider_raw {
+            "anthropic" => ProviderChoice::Anthropic,
+            "openai" => ProviderChoice::OpenAi,
+            "openai-compat" | "openai_compat" => ProviderChoice::OpenAiCompat,
+            other => {
+                return Err(LlmError::NotConfigured(format!(
+                    "AI_MEMORY_LLM_PROVIDER={other} is not one of anthropic|openai|openai-compat"
+                )));
+            }
+        };
+        let model = match non_empty(self.llm_model.as_deref()) {
+            Some(s) => s.to_string(),
+            None => match provider {
+                ProviderChoice::Anthropic => "claude-sonnet-4-6".to_string(),
+                ProviderChoice::OpenAi => "gpt-4o-mini".to_string(),
+                ProviderChoice::OpenAiCompat => {
+                    return Err(LlmError::NotConfigured(
+                        "AI_MEMORY_LLM_MODEL must be set explicitly for openai-compat \
+                         (no safe default for self-hosted / aggregator endpoints)"
+                            .into(),
+                    ));
+                }
+            },
+        };
+        Ok(Some(ProviderConfig {
+            provider,
+            model,
+            api_key: self.provider_api_key(provider),
+            base_url: self.llm_base_url.clone(),
+        }))
+    }
+
+    /// Build the configured embedder settings, if hybrid search is enabled.
+    ///
+    /// # Errors
+    /// Returns [`LlmError::NotConfigured`] for unknown providers, missing API
+    /// keys, or invalid dimensions.
+    pub fn embedder_config(&self) -> LlmResult<Option<EmbedderConfig>> {
+        let Some(provider_raw) = non_empty(self.embedding_provider.as_deref()) else {
+            return Ok(None);
+        };
+        let provider = match provider_raw {
+            "openai" => EmbedderChoice::OpenAi,
+            "voyage" => EmbedderChoice::Voyage,
+            other => {
+                return Err(LlmError::NotConfigured(format!(
+                    "AI_MEMORY_EMBEDDING_PROVIDER={other} not one of openai|voyage"
+                )));
+            }
+        };
+        let model = match non_empty(self.embedding_model.as_deref()) {
+            Some(s) => s.to_string(),
+            None => match provider {
+                EmbedderChoice::OpenAi => "text-embedding-3-small".to_string(),
+                EmbedderChoice::Voyage => "voyage-3".to_string(),
+            },
+        };
+        let dim = self
+            .embedding_dim
+            .unwrap_or_else(|| ai_memory_llm::default_embedding_dim(provider, &model));
+        let api_key = match provider {
+            EmbedderChoice::OpenAi => self
+                .runtime_env
+                .openai_api_key
+                .clone()
+                .ok_or_else(|| LlmError::NotConfigured("OPENAI_API_KEY".into()))?,
+            EmbedderChoice::Voyage => self
+                .runtime_env
+                .voyage_api_key
+                .clone()
+                .ok_or_else(|| LlmError::NotConfigured("VOYAGE_API_KEY".into()))?,
+        };
+        Ok(Some(EmbedderConfig {
+            provider,
+            model,
+            dim,
+            api_key,
+            base_url: self.embedding_base_url.clone(),
+        }))
+    }
+
+    /// Resolve an API key for an explicit `llm-test` provider choice.
+    #[must_use]
+    pub fn provider_api_key(&self, provider: ProviderChoice) -> Option<SecretString> {
+        match provider {
+            ProviderChoice::Anthropic => self.runtime_env.anthropic_api_key.clone(),
+            ProviderChoice::OpenAi => self.runtime_env.openai_api_key.clone(),
+            ProviderChoice::OpenAiCompat => self.runtime_env.llm_api_key.clone(),
+        }
+    }
+
+    /// Base URL fallback for `llm-test --provider openai-compat`.
+    #[must_use]
+    pub fn llm_test_base_url(&self) -> Option<String> {
+        self.llm_base_url
+            .clone()
+            .or_else(|| self.runtime_env.llm_base_url.clone())
+    }
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env_string(name).map(PathBuf::from)
+}
+
+fn env_secret(name: &str) -> Option<SecretString> {
+    env_string(name).map(SecretString::from)
+}
+
+fn non_empty(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn default_data_dir() -> PathBuf {
@@ -177,7 +418,8 @@ mod tests {
     fn defaults_have_canonical_endings() {
         let cfg = Config::default();
         assert!(cfg.data_dir.ends_with("ai-memory"));
-        assert_eq!(cfg.bind, "127.0.0.1:49374");
+        assert_eq!(cfg.bind, DEFAULT_BIND);
+        assert_eq!(cfg.server_url, DEFAULT_SERVER_URL);
         assert_eq!(cfg.log_level, "info");
     }
 

@@ -25,10 +25,12 @@ use std::io::Seek;
 use std::path::PathBuf;
 
 use ai_memory_consolidate::{
-    Bootstrap, BootstrapConfig, BootstrapOutcome, BootstrapSource, SourceCounts, run_lint,
-    run_sweep,
+    Bootstrap, BootstrapConfig, BootstrapOutcome, BootstrapSource, SourceCounts,
+    prune_sources_to_budget, run_lint, run_sweep,
 };
-use ai_memory_core::{PagePath, ProjectId, SessionId, Tier, WorkspaceId};
+use ai_memory_core::{
+    DEFAULT_PROJECT_NAME, DEFAULT_WORKSPACE_NAME, PagePath, ProjectId, SessionId, Tier, WorkspaceId,
+};
 use ai_memory_llm::{Embedder, LlmProvider};
 use ai_memory_store::{DecayParams, ReaderPool, StoreError, WriterHandle, f32_vec_to_bytes};
 use ai_memory_wiki::{Wiki, WritePageRequest};
@@ -496,28 +498,9 @@ fn dry_run_outcome(
             })),
         ));
     }
-    // Mirror the prune logic: sort by drop_priority desc, drop until
-    // under budget. We replicate the constants here rather than
-    // exposing prune_to_budget publicly (it's an implementation detail
-    // of the consolidation pipeline).
-    const CHARS_PER_TOKEN: usize = 4;
     let collected = sources.len();
-    let usable = max_input_tokens.saturating_sub(1_000);
-    let mut sorted = sources;
-    sorted.sort_by_key(|s| std::cmp::Reverse(s.kind.drop_priority()));
-    let mut total: usize = sorted
-        .iter()
-        .map(|s| (s.label.len() + s.text.len() + 16).div_ceil(CHARS_PER_TOKEN))
-        .sum();
-    while total > usable && !sorted.is_empty() {
-        let victim_tokens =
-            (sorted[0].label.len() + sorted[0].text.len() + 16).div_ceil(CHARS_PER_TOKEN);
-        total = total.saturating_sub(victim_tokens);
-        sorted.remove(0);
-    }
-    let kept = &sorted;
-    let dropped = collected - kept.len();
-    let counts = SourceCounts::from_sources(kept);
+    let (kept, dropped, total) = prune_sources_to_budget(sources, max_input_tokens);
+    let counts = SourceCounts::from_sources(&kept);
     let outcome = BootstrapOutcome {
         sources_collected: collected,
         sources_sent: kept.len(),
@@ -666,7 +649,11 @@ async fn handle_reorg(
     State(state): State<Arc<AdminState>>,
     Json(req): Json<ReorgRequest>,
 ) -> impl IntoResponse {
-    let ws = match state.writer.get_or_create_workspace("default").await {
+    let ws = match state
+        .writer
+        .get_or_create_workspace(DEFAULT_WORKSPACE_NAME)
+        .await
+    {
         Ok(id) => id,
         Err(e) => {
             return (
@@ -781,11 +768,11 @@ struct LintRequest {
 }
 
 fn default_workspace() -> String {
-    "default".to_string()
+    DEFAULT_WORKSPACE_NAME.to_string()
 }
 
 fn default_project() -> String {
-    "scratch".to_string()
+    DEFAULT_PROJECT_NAME.to_string()
 }
 
 async fn handle_lint(

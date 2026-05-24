@@ -102,4 +102,20 @@ mod tests {
         let stale = retention_score(&p, 100.0, 10, Some(120.0));
         assert!(recent > stale, "recent {recent} vs stale {stale}");
     }
+
+    #[test]
+    fn score_decreases_as_age_increases_without_access() {
+        let p = DecayParams::default();
+        let young = retention_score(&p, 10.0, 0, None);
+        let old = retention_score(&p, 20.0, 0, None);
+        assert!(young > old, "young {young} vs old {old}");
+    }
+
+    #[test]
+    fn score_increases_with_access_count_when_access_age_matches() {
+        let p = DecayParams::default();
+        let low = retention_score(&p, 100.0, 1, Some(5.0));
+        let high = retention_score(&p, 100.0, 20, Some(5.0));
+        assert!(high > low, "high {high} vs low {low}");
+    }
 }

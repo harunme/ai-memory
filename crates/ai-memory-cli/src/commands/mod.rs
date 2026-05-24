@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::config::Config;
+
 pub mod apply_shared;
 pub mod backup;
 pub mod bootstrap;
@@ -48,12 +50,12 @@ pub mod write_page;
 /// auto-target the same project the user's interactive sessions
 /// have been writing into. Dot-prefixed dirs are preserved
 /// verbatim (`~/.config` → project `.config`).
-pub(crate) fn resolve_project_name(explicit: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_project_name(config: &Config, explicit: Option<&str>) -> Result<String> {
     if let Some(p) = explicit.filter(|s| !s.is_empty()) {
         return Ok(p.to_string());
     }
-    if let Ok(host_cwd) = std::env::var("AI_MEMORY_HOST_CWD")
-        && let Some(name) = std::path::Path::new(&host_cwd)
+    if let Some(host_cwd) = config.runtime_env.host_cwd()
+        && let Some(name) = std::path::Path::new(host_cwd)
             .file_name()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty())
@@ -102,4 +104,33 @@ pub(crate) fn resolve_project_name(explicit: Option<&str>) -> Result<String> {
                 cwd.display()
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RuntimeEnv;
+
+    #[test]
+    fn resolve_project_name_prefers_explicit_value() {
+        let config = Config {
+            runtime_env: RuntimeEnv::with_host_cwd_for_tests("/host/ignored"),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            resolve_project_name(&config, Some("explicit-project")).unwrap(),
+            "explicit-project"
+        );
+    }
+
+    #[test]
+    fn resolve_project_name_uses_host_cwd_basename() {
+        let config = Config {
+            runtime_env: RuntimeEnv::with_host_cwd_for_tests("/host/my-project"),
+            ..Config::default()
+        };
+
+        assert_eq!(resolve_project_name(&config, None).unwrap(), "my-project");
+    }
 }

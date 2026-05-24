@@ -39,8 +39,8 @@ struct Counts {
 /// # Errors
 /// Returns an error if the server is unreachable, returns non-2xx, or
 /// the response can't be parsed.
-pub async fn run(_config: &Config, args: StatusArgs) -> Result<()> {
-    let ep = ServerEndpoint::from_env();
+pub async fn run(config: &Config, args: StatusArgs) -> Result<()> {
+    let ep = ServerEndpoint::from_config(config);
     let report: Report = get_json(&ep, "/admin/status", &[]).await?;
 
     if args.json {

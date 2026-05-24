@@ -381,6 +381,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bearer_header_takes_precedence_over_cookie() {
+        let r = router_with_auth(Some("right-token"));
+        let resp = r
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .header("Authorization", "Bearer wrong-token")
+                    .header("Cookie", "ai_memory_auth=right-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn cookie_with_wrong_token_fails() {
         let r = router_with_auth(Some("right-token"));
         let resp = r

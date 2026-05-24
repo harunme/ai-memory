@@ -16,6 +16,7 @@ use tracing::debug;
 use crate::error::{LlmError, LlmResult};
 use crate::openai::OpenAiProvider;
 use crate::provider::LlmProvider;
+use crate::text::{suffix_within_bytes, truncate_with_ellipsis};
 use crate::types::{ChatRequest, ChatResponse};
 
 // Compiled once. Matches <think>, <thinking>, <analysis>, <reasoning> blocks
@@ -115,9 +116,8 @@ impl LlmProvider for OpenAiCompatProvider {
                     // 4 KB tells the full story for any reasonable
                     // structured-output response. Includes head + tail
                     // because some failures truncate the closing brace.
-                    let head = truncate(&cleaned, 2000);
-                    let tail_start = cleaned.len().saturating_sub(2000);
-                    let tail = &cleaned[tail_start..];
+                    let head = truncate_with_ellipsis(&cleaned, 2000);
+                    let tail = suffix_within_bytes(&cleaned, 2000);
                     debug!(
                         head = %head,
                         tail = %tail,
@@ -174,14 +174,6 @@ fn first_json_object(s: &str) -> Option<&str> {
         }
     }
     None
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
-    }
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
 use crate::openai::normalize_openai_base;
+use crate::text::truncate_with_ellipsis;
 
 /// Provider-agnostic embedding API.
 ///
@@ -132,7 +133,7 @@ impl Embedder for OpenAiEmbedder {
             let body = resp.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate(&body, 1024),
+                body: truncate_with_ellipsis(&body, 1024),
             });
         }
         let parsed: OpenAiEmbeddingResponse = resp.json().await?;
@@ -239,7 +240,7 @@ impl Embedder for VoyageEmbedder {
             let body = resp.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate(&body, 1024),
+                body: truncate_with_ellipsis(&body, 1024),
             });
         }
         let parsed: VoyageResponse = resp.json().await?;
@@ -323,14 +324,6 @@ fn fnv1a(s: &str) -> u64 {
         h = h.wrapping_mul(0x100_0000_01b3);
     }
     h
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
-    }
 }
 
 /// Cosine similarity between two same-dim unit vectors. (= dot product

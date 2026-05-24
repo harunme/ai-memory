@@ -14,6 +14,12 @@ pub mod page;
 pub mod routing_snippet;
 pub mod sanitize;
 
+/// Default workspace name used by the single-workspace v1 flow.
+pub const DEFAULT_WORKSPACE_NAME: &str = "default";
+
+/// Defensive project fallback used only when no cwd/project is available.
+pub const DEFAULT_PROJECT_NAME: &str = "scratch";
+
 pub use active_project::ActiveProject;
 pub use error::{MemoryError, MemoryResult};
 pub use handoff::{Handoff, HandoffState, NewHandoff};

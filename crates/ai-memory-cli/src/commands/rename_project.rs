@@ -15,9 +15,9 @@ use crate::http_client::{ServerEndpoint, post_json};
 /// # Errors
 /// Returns an error when the server is unreachable or returns a non-2xx
 /// response (e.g. 404 workspace/project not found, 422 name taken or invalid).
-pub async fn run(_config: &Config, args: RenameProjectArgs) -> Result<()> {
-    let endpoint = ServerEndpoint::from_env();
-    let from = super::resolve_project_name(args.from.as_deref())?;
+pub async fn run(config: &Config, args: RenameProjectArgs) -> Result<()> {
+    let endpoint = ServerEndpoint::from_config(config);
+    let from = super::resolve_project_name(config, args.from.as_deref())?;
     let body = serde_json::json!({
         "workspace": args.workspace,
         "from": from,

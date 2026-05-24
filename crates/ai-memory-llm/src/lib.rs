@@ -28,12 +28,14 @@ pub mod openai_compat;
 pub mod provider;
 pub mod types;
 
+mod text;
+
 pub use anthropic::AnthropicProvider;
 pub use embedding::{Embedder, OpenAiEmbedder, SyntheticEmbedder, VoyageEmbedder, cosine};
 pub use error::{LlmError, LlmResult};
 pub use factory::{
     EmbedderChoice, EmbedderConfig, ProviderChoice, ProviderConfig, build_embedder, build_provider,
-    embedder_from_env, provider_from_env,
+    default_embedding_dim,
 };
 pub use openai::OpenAiProvider;
 pub use openai_compat::OpenAiCompatProvider;

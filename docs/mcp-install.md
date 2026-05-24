@@ -20,8 +20,9 @@ This page documents how to register ai-memory as an MCP server with
 the agent CLIs **that are not covered inline in the README**.
 
 The three flagship clients - Claude Code, OpenAI Codex, OpenCode -
-have lifecycle-hook scripts under [`hooks/`](../hooks) and are
-covered in the [main README](../README.md#configure-your-agent-cli).
+have automatic capture integrations (shell hooks for Claude Code /
+Codex, a TypeScript plugin for OpenCode) and are covered in the
+[main README](../README.md#configure-your-agent-cli).
 
 The clients on this page are **MCP-only**: they expose long-term
 memory to their LLM via ai-memory's MCP tools (`memory_query`,
@@ -261,8 +262,8 @@ that *starts* the next one - to play nicely with ai-memory:
 
 | Side | What's needed | Covered by |
 |---|---|---|
-| **Ending side** | The `SessionEnd` hook must fire ai-memory's `/hook` endpoint. | Built-in for Claude Code / Codex / OpenCode via the scripts in `hooks/`. |
-| **Starting side** | Either (a) the `SessionStart` hook auto-injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / OpenCode. (b) works for any MCP-capable client if you nudge the model - see [the CLAUDE.md snippet](../README.md#nudging-the-agent-to-use-memory-proactively). |
+| **Ending side** | The agent must create a handoff, either through a true session-end hook or by calling `memory_handoff_begin`. | Built-in for Claude Code; Codex uses its stop/session hooks. OpenCode has no true session-end event, so ask it to call `memory_handoff_begin` before quitting when you need a handoff. |
+| **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / OpenCode. (b) works for any MCP-capable client if you nudge the model - see [the CLAUDE.md snippet](../README.md#nudging-the-agent-to-use-memory-proactively). |
 
 So a typical mixed workflow looks like:
 

@@ -118,8 +118,37 @@ impl HookEnvelope {
         // Codex `sessionId`. JSON keys are case-sensitive, so all three
         // spellings must be listed or OpenCode tool events fail the
         // "missing session_id" check in the router (issue #1).
-        let session_id = extract_string(&raw, &["session_id", "sessionId", "sessionID", "session"]);
-        let cwd = extract_string(&raw, &["cwd", "current_dir", "working_dir"]);
+        let session_id = extract_string(&raw, &["session_id", "sessionId", "sessionID", "session"])
+            .or_else(|| {
+                extract_string_path(
+                    &raw,
+                    &[
+                        &["info", "id"],
+                        &["properties", "sessionID"],
+                        &["properties", "info", "id"],
+                        &["event", "properties", "sessionID"],
+                        &["event", "properties", "info", "id"],
+                        &["payload", "info", "id"],
+                        &["payload", "properties", "sessionID"],
+                        &["payload", "properties", "info", "id"],
+                    ],
+                )
+            });
+        let cwd = extract_string(&raw, &["cwd", "current_dir", "working_dir", "directory"])
+            .or_else(|| {
+                extract_string_path(
+                    &raw,
+                    &[
+                        &["path", "cwd"],
+                        &["info", "directory"],
+                        &["properties", "info", "directory"],
+                        &["event", "properties", "info", "directory"],
+                        &["payload", "path", "cwd"],
+                        &["payload", "info", "directory"],
+                        &["payload", "properties", "info", "directory"],
+                    ],
+                )
+            });
         let title_hint = best_title_hint(event, &raw);
         let body_excerpt = best_body_excerpt(event, &raw);
         Self {
@@ -136,13 +165,64 @@ impl HookEnvelope {
 
 fn extract_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     for key in keys {
-        if let Some(s) = value.get(*key).and_then(serde_json::Value::as_str)
+        for candidate in extraction_candidates(value) {
+            if let Some(s) = candidate.get(*key).and_then(serde_json::Value::as_str)
+                && !s.is_empty()
+            {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_string_path(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    for path in paths {
+        if let Some(s) = value_at_path(value, path).and_then(serde_json::Value::as_str)
             && !s.is_empty()
         {
             return Some(s.to_string());
         }
     }
     None
+}
+
+fn value_at_path<'a>(
+    mut value: &'a serde_json::Value,
+    path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    for segment in path {
+        value = value.get(*segment)?;
+    }
+    Some(value)
+}
+
+fn extraction_candidates(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut out = Vec::new();
+    push_candidates(&mut out, value);
+    if let Some(payload) = value.get("payload") {
+        push_candidates(&mut out, payload);
+    }
+    if let Some(event) = value.get("event") {
+        push_candidates(&mut out, event);
+    }
+    out
+}
+
+fn push_candidates<'a>(out: &mut Vec<&'a serde_json::Value>, value: &'a serde_json::Value) {
+    out.push(value);
+    if let Some(properties) = value.get("properties") {
+        out.push(properties);
+        if let Some(info) = properties.get("info") {
+            out.push(info);
+        }
+    }
+    if let Some(info) = value.get("info") {
+        out.push(info);
+    }
+    if let Some(path) = value.get("path") {
+        out.push(path);
+    }
 }
 
 fn best_title_hint(event: HookEvent, raw: &serde_json::Value) -> Option<String> {
@@ -190,8 +270,16 @@ fn truncate_excerpt(s: &str) -> String {
     if s.len() <= MAX {
         s.to_string()
     } else {
-        let mut buf = String::with_capacity(MAX + 1);
-        buf.push_str(&s[..MAX]);
+        let mut buf = String::with_capacity(MAX + '…'.len_utf8());
+        let mut end = 0;
+        for (idx, ch) in s.char_indices() {
+            let next = idx + ch.len_utf8();
+            if next > MAX {
+                break;
+            }
+            end = next;
+        }
+        buf.push_str(&s[..end]);
         buf.push('…');
         buf
     }
@@ -252,6 +340,67 @@ mod tests {
         });
         let env = HookEnvelope::from_query_and_body(q, raw);
         assert_eq!(env.session_id.as_deref(), Some("ses_abc123"));
+    }
+
+    /// Earlier OpenCode plugin generation wrapped the actual SDK hook
+    /// input under `payload`. Keep accepting that shape so users with
+    /// an old plugin don't silently lose project routing until they
+    /// restart with the fixed plugin.
+    #[test]
+    fn envelope_extracts_legacy_opencode_nested_payload() {
+        let q = HookQuery {
+            event: "post-tool-use".into(),
+            agent: Some("open-code".into()),
+        };
+        let raw = serde_json::json!({
+            "hook_event_name": "post-tool-use",
+            "agent": "open-code",
+            "payload": {
+                "sessionID": "ses_nested",
+                "cwd": "/home/user/ai-memory",
+                "tool": "bash",
+                "output": "tests passed"
+            }
+        });
+        let env = HookEnvelope::from_query_and_body(q, raw);
+        assert_eq!(env.session_id.as_deref(), Some("ses_nested"));
+        assert_eq!(env.cwd.as_deref(), Some("/home/user/ai-memory"));
+        assert_eq!(env.title_hint.as_deref(), Some("bash"));
+        assert!(
+            env.body_excerpt
+                .as_deref()
+                .is_some_and(|body| body.contains("tests passed")),
+            "post-tool body should include nested output: {:?}",
+            env.body_excerpt
+        );
+    }
+
+    /// OpenCode's plugin `event` hook receives bus events shaped like
+    /// `{ event: { type, properties } }`; session creation carries the
+    /// cwd as `properties.info.directory`.
+    #[test]
+    fn envelope_extracts_opencode_bus_event_session_info() {
+        let q = HookQuery {
+            event: "session-start".into(),
+            agent: Some("open-code".into()),
+        };
+        let raw = serde_json::json!({
+            "event": {
+                "type": "session.created",
+                "properties": {
+                    "sessionID": "ses_bus",
+                    "info": {
+                        "id": "ses_bus",
+                        "directory": "/home/user/ai-memory",
+                        "title": "New session"
+                    }
+                }
+            }
+        });
+        let env = HookEnvelope::from_query_and_body(q, raw);
+        assert_eq!(env.session_id.as_deref(), Some("ses_bus"));
+        assert_eq!(env.cwd.as_deref(), Some("/home/user/ai-memory"));
+        assert_eq!(env.title_hint.as_deref(), Some("New session"));
     }
 
     /// Alternative agent-name spellings all map to the same canonical
@@ -368,5 +517,24 @@ mod tests {
         let title = env.title_hint.unwrap();
         assert!(title.chars().count() <= 80);
         assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn post_tool_excerpt_truncates_without_splitting_utf8() {
+        let q = HookQuery {
+            event: "post-tool-use".into(),
+            agent: Some("claude-code".into()),
+        };
+        let output = format!("{}é", "x".repeat(1_999));
+        let env = HookEnvelope::from_query_and_body(
+            q,
+            serde_json::json!({
+                "tool": "bash",
+                "result": output,
+            }),
+        );
+        let excerpt = env.body_excerpt.unwrap();
+        assert!(excerpt.ends_with('…'));
+        assert!(excerpt.starts_with("tool: bash\n---\n"));
     }
 }

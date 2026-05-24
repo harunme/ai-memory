@@ -7,9 +7,7 @@
 
 use std::sync::Arc;
 
-use ai_memory_core::{
-    Observation, ObservationKind, PagePath, ProjectId, SessionId, Tier, WorkspaceId,
-};
+use ai_memory_core::{Observation, PagePath, ProjectId, SessionId, Tier, WorkspaceId};
 use ai_memory_llm::{ChatMessage, ChatRequest, LlmError, LlmProvider, Role, complete_structured};
 use ai_memory_store::{ReaderPool, WriterHandle};
 use ai_memory_wiki::{Wiki, WritePageRequest};
@@ -541,10 +539,6 @@ fn slugify_for_rule(title: &str) -> String {
 fn short_id(s: &str) -> String {
     s.chars().take(8).collect()
 }
-
-/// Suppress the unused-variant lint for now; consumers will use
-/// [`ObservationKind`] via the observations parameter.
-const _OBSERVATION_KIND: Option<ObservationKind> = None;
 
 /// System prompt for single-page consolidation. Loaded at compile
 /// time from `prompts/single_consolidate_system.md`.

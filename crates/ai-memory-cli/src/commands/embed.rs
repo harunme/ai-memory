@@ -25,9 +25,9 @@ struct EmbedRequest {
 /// # Errors
 /// Returns an error if the server is unreachable or returns a non-2xx
 /// response.
-pub async fn run(_config: &Config, args: EmbedArgs) -> Result<()> {
-    let endpoint = ServerEndpoint::from_env();
-    let project = super::resolve_project_name(args.project.as_deref())?;
+pub async fn run(config: &Config, args: EmbedArgs) -> Result<()> {
+    let endpoint = ServerEndpoint::from_config(config);
+    let project = super::resolve_project_name(config, args.project.as_deref())?;
     let report: serde_json::Value = post_json(
         &endpoint,
         "/admin/embed",

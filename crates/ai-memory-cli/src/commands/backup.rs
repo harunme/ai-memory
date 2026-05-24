@@ -17,8 +17,8 @@ use crate::http_client::{ServerEndpoint, post_bytes};
 /// # Errors
 /// Returns an error if the POST to `/admin/backup` fails, the server
 /// returns a non-2xx status, or the output file cannot be written.
-pub async fn run(_config: &Config, args: BackupArgs) -> Result<()> {
-    let endpoint = ServerEndpoint::from_env();
+pub async fn run(config: &Config, args: BackupArgs) -> Result<()> {
+    let endpoint = ServerEndpoint::from_config(config);
     let bytes = post_bytes(&endpoint, "/admin/backup")
         .await
         .context("requesting backup from server")?;

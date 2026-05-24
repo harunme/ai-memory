@@ -24,8 +24,8 @@ struct PurgeProjectRequest {
 /// # Errors
 /// Returns an error when `--confirm` is absent, the server is unreachable,
 /// or the server returns a non-2xx response.
-pub async fn run(_config: &Config, args: PurgeProjectArgs) -> Result<()> {
-    let project = super::resolve_project_name(args.project.as_deref())?;
+pub async fn run(config: &Config, args: PurgeProjectArgs) -> Result<()> {
+    let project = super::resolve_project_name(config, args.project.as_deref())?;
 
     if !args.confirm {
         bail!(
@@ -37,7 +37,7 @@ pub async fn run(_config: &Config, args: PurgeProjectArgs) -> Result<()> {
         );
     }
 
-    let endpoint = ServerEndpoint::from_env();
+    let endpoint = ServerEndpoint::from_config(config);
     let report: serde_json::Value = post_json(
         &endpoint,
         "/admin/purge-project",

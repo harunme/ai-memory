@@ -10,9 +10,9 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     /// Override the data directory.
     ///
-    /// Defaults to a platform path under `dirs::data_local_dir()`. Also
-    /// settable via the `AI_MEMORY_DATA_DIR` environment variable.
-    #[arg(long, env = "AI_MEMORY_DATA_DIR", global = true)]
+    /// Defaults to a platform path under `dirs::data_local_dir()`. The
+    /// config loader also honours `AI_MEMORY_DATA_DIR`.
+    #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
 
     /// Path to an explicit config file (defaults to `<data_dir>/config.toml`).
@@ -105,8 +105,8 @@ pub struct ReorgArgs {
 /// Arguments for `purge-project`.
 #[derive(Debug, Args)]
 pub struct PurgeProjectArgs {
-    /// Workspace name. Defaults to "default".
-    #[arg(long, default_value = "default")]
+    /// Workspace name. Defaults to `default`.
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the basename of
     /// the current git repo root (or CWD if no git repo).
@@ -121,8 +121,8 @@ pub struct PurgeProjectArgs {
 /// Arguments for `rename-project`.
 #[derive(Debug, Args)]
 pub struct RenameProjectArgs {
-    /// Workspace name. Defaults to "default".
-    #[arg(long, default_value = "default")]
+    /// Workspace name. Defaults to `default`.
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Current project name. When omitted, auto-derives from the
     /// basename of the current git repo root (or CWD) — handy when
@@ -168,7 +168,7 @@ pub struct BootstrapArgs {
     pub repo_path: Option<PathBuf>,
     /// Workspace name. Defaults to `default` (the single workspace
     /// all hook-captured sessions land in today).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the basename of
     /// the resolved repo path — same heuristic the hook router uses
@@ -242,11 +242,11 @@ pub struct SetupAgentArgs {
     #[arg(long)]
     pub host_prefix: Option<PathBuf>,
     /// MCP / hook ingress URL the agent should POST to.
-    #[arg(long, default_value = "http://127.0.0.1:49374")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_SERVER_URL.to_string())]
     pub server_url: String,
-    /// Bearer token embedded into each hook's env block. Picked up
-    /// from `AI_MEMORY_AUTH_TOKEN` if unset.
-    #[arg(long, env = "AI_MEMORY_AUTH_TOKEN", hide_env_values = true)]
+    /// Bearer token embedded into each hook's env block. When omitted,
+    /// uses the token resolved by the config loader.
+    #[arg(long, hide_env_values = true)]
     pub auth_token: Option<String>,
     /// Source directory for the embedded hook bundle. Defaults to
     /// `/usr/local/share/ai-memory/hooks` (the docker image's
@@ -288,7 +288,7 @@ pub struct SearchArgs {
     /// FTS5 query string (e.g. `"karpathy wiki"` or `quick OR slow`).
     pub query: String,
     /// Workspace name. Defaults to `default`.
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the current project.
     #[arg(long)]
@@ -342,8 +342,8 @@ pub enum AgentChoice {
     /// Google Gemini CLI — JSON-config hooks in `~/.gemini/settings.json`.
     GeminiCli,
     /// OpenCode (open-source coding agent) — TypeScript plugin hooks
-    /// under `~/.config/opencode/plugins/`. Print-only for now; the
-    /// plugin generator lands in a follow-up commit.
+    /// under `~/.config/opencode/plugins/`. `--apply` writes the plugin
+    /// file directly; restart OpenCode for it to load.
     ///
     /// The `opencode` (no hyphen) alias matches both the staged hook
     /// dir on disk (`~/.local/share/ai-memory/hooks/opencode/`) and
@@ -418,7 +418,7 @@ pub struct EmbedArgs {
     #[arg(long)]
     pub force: bool,
     /// Workspace name (auto-created if absent).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the basename of
     /// the current git repo root (or CWD if no git repo). Matches the
@@ -435,7 +435,7 @@ pub struct ForgetSweepArgs {
     #[arg(long)]
     pub dry_run: bool,
     /// Workspace name (auto-created if absent).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the basename of
     /// the current git repo root (or CWD if no git repo).
@@ -455,7 +455,7 @@ pub struct LintArgs {
     #[arg(long)]
     pub no_llm: bool,
     /// Workspace name (auto-created if absent).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name. When omitted, auto-derived from the basename of
     /// the current git repo root (or CWD if no git repo).
@@ -476,10 +476,10 @@ pub struct LlmTestArgs {
     #[arg(long)]
     pub prompt: String,
     /// Base URL override (required for openai-compat).
-    #[arg(long, env = "LLM_BASE_URL")]
+    #[arg(long)]
     pub base_url: Option<String>,
     /// Optional API key override (otherwise pulled from env).
-    #[arg(long, env = "LLM_API_KEY", hide_env_values = true)]
+    #[arg(long, hide_env_values = true)]
     pub api_key: Option<String>,
 }
 
@@ -491,24 +491,23 @@ pub struct InstallHooksArgs {
     pub agent: AgentChoice,
     /// Filesystem root that contains the vendored hook scripts (defaults
     /// to the repo's `hooks/` if known, else `/usr/local/share/ai-memory/hooks`).
+    /// Ignored for OpenCode, whose integration is a generated TypeScript plugin.
     #[arg(long)]
     pub hooks_dir: Option<PathBuf>,
     /// Server URL the hooks will POST to.
-    #[arg(long, default_value = "http://127.0.0.1:49374")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_SERVER_URL.to_string())]
     pub server_url: String,
     /// Bearer token to embed in the hook config's `env` block. When
     /// set, every hook call carries `Authorization: Bearer <token>`,
     /// matching what the server requires when AI_MEMORY_AUTH_TOKEN
     /// is set there. Generate one with `ai-memory generate-auth-token`.
-    #[arg(long, env = "AI_MEMORY_AUTH_TOKEN", hide_env_values = true)]
+    #[arg(long, hide_env_values = true)]
     pub auth_token: Option<String>,
-    /// **Mutate** ~/.claude/settings.json in place instead of just
-    /// printing the snippet. Idempotent — replaces the seven hook
-    /// entries (SessionStart, UserPromptSubmit, …) and preserves
-    /// any other hook config the user has. Only supported for
-    /// `--agent claude-code` today; Codex / OpenCode hook config
-    /// formats are still in flux upstream, so they keep the print
-    /// path. A timestamped backup is written next to the original.
+    /// **Mutate** the selected agent's hook config in place instead of
+    /// printing the snippet/plugin. Idempotent — replaces the ai-memory
+    /// hook entries or generated plugin and preserves unrelated config
+    /// where the agent format supports merging. A timestamped backup is
+    /// written next to the original before each modifying write.
     #[arg(long)]
     pub apply: bool,
     /// Override the settings.json path (auto-detected as
@@ -524,7 +523,7 @@ pub struct InstallMcpArgs {
     #[arg(long, value_enum, default_value_t = McpClient::ClaudeCode)]
     pub client: McpClient,
     /// MCP HTTP endpoint URL the client should connect to.
-    #[arg(long, default_value = "http://127.0.0.1:49374/mcp")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_MCP_URL.to_string())]
     pub server_url: String,
     /// Friendly name the client should show for this server entry.
     #[arg(long, default_value = "ai-memory")]
@@ -532,8 +531,8 @@ pub struct InstallMcpArgs {
     /// Bearer token to embed in the client config. When set, the
     /// rendered snippet includes an `Authorization: Bearer <token>`
     /// header so the client can authenticate against a server that
-    /// requires it. Picked up from `AI_MEMORY_AUTH_TOKEN` if unset.
-    #[arg(long, env = "AI_MEMORY_AUTH_TOKEN", hide_env_values = true)]
+    /// requires it. When omitted, uses the token resolved by the config loader.
+    #[arg(long, hide_env_values = true)]
     pub auth_token: Option<String>,
     /// **Mutate** the client's config file in place instead of just
     /// printing the snippet. Idempotent: replaces any existing entry
@@ -570,10 +569,10 @@ pub struct ServeArgs {
     #[arg(long)]
     pub no_watcher: bool,
     /// Workspace name (auto-created).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name within the workspace (auto-created).
-    #[arg(long, default_value = "scratch")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_PROJECT.to_string())]
     pub project: String,
     /// Mount the read-only wiki browser at /web. Off by default. When
     /// enabled, anyone who can reach the MCP endpoint can also browse
@@ -616,9 +615,9 @@ pub struct WritePageArgs {
     #[arg(long)]
     pub pinned: bool,
     /// Workspace name (auto-created if absent).
-    #[arg(long, default_value = "default")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
     pub workspace: String,
     /// Project name within the workspace (auto-created if absent).
-    #[arg(long, default_value = "scratch")]
+    #[arg(long, default_value_t = crate::config::DEFAULT_PROJECT.to_string())]
     pub project: String,
 }

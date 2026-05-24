@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use ai_memory_consolidate::Consolidator;
 use ai_memory_core::{
-    ActiveProject, AgentKind, Handoff, NewHandoff, NewObservation, NewSession, ObservationKind,
-    ProjectId, Sanitized, Sanitizer, SessionId, WorkspaceId,
+    ActiveProject, AgentKind, DEFAULT_WORKSPACE_NAME, Handoff, NewHandoff, NewObservation,
+    NewSession, ObservationKind, ProjectId, Sanitized, Sanitizer, SessionId, WorkspaceId,
 };
 use ai_memory_store::WriterHandle;
 use ai_memory_wiki::Wiki;
@@ -223,17 +223,22 @@ async fn resolve_project_ids(
             return Ok(*ids);
         }
     }
-    let project_name = std::path::Path::new(cwd)
+    let Some(project_name) = std::path::Path::new(cwd)
         .file_name()
         .and_then(|s| s.to_str())
         .map(str::to_string)
         .filter(|s| !s.is_empty())
+    else {
         // Defensive: if basename derivation fails (e.g. cwd is "/"),
         // fall back to the server defaults rather than hard-erroring.
-        .ok_or_else(|| anyhow::anyhow!("could not derive project name from cwd {cwd:?}"))?;
+        state
+            .active_project
+            .set(state.workspace_id, state.project_id);
+        return Ok((state.workspace_id, state.project_id));
+    };
     let ws = state
         .writer
-        .get_or_create_workspace("default".to_string())
+        .get_or_create_workspace(DEFAULT_WORKSPACE_NAME.to_string())
         .await
         .map_err(|e| anyhow::anyhow!("get_or_create_workspace: {e}"))?;
     let proj = state
@@ -261,18 +266,18 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
     let session_id = resolve_session_id(&env)?;
     let (ws, proj) = resolve_project_ids(state, env.cwd.as_deref()).await?;
 
-    // Begin the session row if SessionStart, otherwise no-op (the
-    // `INSERT OR IGNORE` makes this safe).
-    if matches!(env.event, HookEvent::SessionStart) {
-        let new_session = NewSession {
-            id: session_id,
-            workspace_id: ws,
-            project_id: proj,
-            agent_kind: env.agent,
-            cwd: env.cwd.as_ref().map(std::path::PathBuf::from),
-        };
-        state.writer.begin_session(new_session).await?;
-    }
+    // Hooks are fire-and-forget and may arrive out of order. Begin the
+    // session idempotently before every observation so a resumed agent
+    // session, or a prompt racing ahead of SessionStart, cannot trip the
+    // observations.session_id foreign key.
+    let new_session = NewSession {
+        id: session_id,
+        workspace_id: ws,
+        project_id: proj,
+        agent_kind: env.agent,
+        cwd: env.cwd.as_ref().map(std::path::PathBuf::from),
+    };
+    state.writer.begin_session(new_session).await?;
 
     // Persist the observation row.
     let kind = env.event.to_observation_kind();
@@ -623,6 +628,32 @@ mod tests {
         assert!(state.active_project.get().is_none());
     }
 
+    #[tokio::test]
+    async fn process_with_root_cwd_falls_back_to_state_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let (ws, proj) = resolve_project_ids(&state, Some("/")).await.unwrap();
+        assert_eq!(ws, state.workspace_id);
+        assert_eq!(proj, state.project_id);
+        assert_eq!(state.active_project.get(), Some((ws, proj)));
+    }
+
+    #[test]
+    fn resolve_session_id_hashes_agent_ids_deterministically() {
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "post-tool-use".into(),
+                agent: Some("opencode".into()),
+            },
+            serde_json::json!({ "sessionID": "opencode-session-123" }),
+        );
+
+        let first = resolve_session_id(&env).unwrap();
+        let second = resolve_session_id(&env).unwrap();
+        assert_eq!(first, second);
+    }
+
     /// A second call for the same cwd must hit the in-memory cache — no
     /// additional `get_or_create_project` writes happen, proven by
     /// inspecting the cache after both calls.
@@ -684,5 +715,29 @@ mod tests {
             expected_proj, state.project_id,
             "routing must not use server-default project"
         );
+    }
+
+    #[tokio::test]
+    async fn process_accepts_prompt_before_session_start() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt".into(),
+                agent: Some("opencode".into()),
+            },
+            serde_json::json!({
+                "sessionID": "opencode-resumed-session",
+                "cwd": "/home/user/resumed-project",
+                "prompt": "continue",
+            }),
+        );
+
+        process(&state, env).await.unwrap();
+
+        let counts = state.reader.status_counts().await.unwrap();
+        assert_eq!(counts.sessions, 1);
+        assert_eq!(counts.observations, 1);
     }
 }

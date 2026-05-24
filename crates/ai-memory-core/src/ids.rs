@@ -233,6 +233,18 @@ mod tests {
     }
 
     #[test]
+    fn id_round_trips_through_bytes() {
+        let id = ProjectId::new();
+        assert_eq!(ProjectId::from_slice(id.as_bytes()).unwrap(), id);
+    }
+
+    #[test]
+    fn id_rejects_malformed_byte_lengths() {
+        assert!(PageId::from_slice(&[0_u8; 15]).is_err());
+        assert!(PageId::from_slice(&[0_u8; 17]).is_err());
+    }
+
+    #[test]
     fn agent_kind_serde() {
         let k = AgentKind::ClaudeCode;
         let s = serde_json::to_string(&k).unwrap();

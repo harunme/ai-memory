@@ -45,8 +45,8 @@ struct ReorgReport {
 /// # Errors
 /// Returns an error if the server is unreachable or returns a non-2xx
 /// response.
-pub async fn run(_config: &Config, args: ReorgArgs) -> Result<()> {
-    let endpoint = ServerEndpoint::from_env();
+pub async fn run(config: &Config, args: ReorgArgs) -> Result<()> {
+    let endpoint = ServerEndpoint::from_config(config);
     let report: ReorgReport = post_json(
         &endpoint,
         "/admin/reorg",

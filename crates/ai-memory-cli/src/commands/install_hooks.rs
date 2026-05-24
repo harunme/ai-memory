@@ -32,7 +32,6 @@ use crate::config::Config;
 /// # Errors
 /// Returns an error if the hook script directory cannot be located.
 pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
-    let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
     let auth_token_owned = args
         .auth_token
         .clone()
@@ -40,20 +39,22 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     let auth = auth_token_owned.as_deref();
     if args.apply {
         return match args.agent {
+            AgentChoice::OpenCode => apply_to_opencode_plugin(&args.server_url, auth, &args),
             AgentChoice::ClaudeCode => {
+                let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
                 apply_to_claude_code_settings(&hooks_dir, &args.server_url, auth, &args)
             }
             AgentChoice::Codex => {
+                let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
                 apply_to_codex_settings(&hooks_dir, &args.server_url, auth, &args)
             }
             AgentChoice::Cursor => {
+                let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
                 apply_to_cursor_settings(&hooks_dir, &args.server_url, auth, &args)
             }
             AgentChoice::GeminiCli => {
+                let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
                 apply_to_gemini_settings(&hooks_dir, &args.server_url, auth, &args)
-            }
-            AgentChoice::OpenCode => {
-                apply_to_opencode_plugin(&hooks_dir, &args.server_url, auth, &args)
             }
             AgentChoice::Openclaw => {
                 println!(
@@ -72,11 +73,23 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         };
     }
     match args.agent {
-        AgentChoice::ClaudeCode => render_claude_code(&hooks_dir, &args.server_url, auth),
-        AgentChoice::Codex => render_agent("codex", &hooks_dir, &args.server_url, auth),
-        AgentChoice::Cursor => render_agent("cursor", &hooks_dir, &args.server_url, auth),
-        AgentChoice::GeminiCli => render_agent("gemini-cli", &hooks_dir, &args.server_url, auth),
-        AgentChoice::OpenCode => render_agent("opencode", &hooks_dir, &args.server_url, auth),
+        AgentChoice::OpenCode => render_opencode_plugin(&args.server_url, auth),
+        AgentChoice::ClaudeCode => {
+            let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+            render_claude_code(&hooks_dir, &args.server_url, auth)
+        }
+        AgentChoice::Codex => {
+            let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+            render_agent("codex", &hooks_dir, &args.server_url, auth)
+        }
+        AgentChoice::Cursor => {
+            let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+            render_agent("cursor", &hooks_dir, &args.server_url, auth)
+        }
+        AgentChoice::GeminiCli => {
+            let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+            render_agent("gemini-cli", &hooks_dir, &args.server_url, auth)
+        }
         AgentChoice::Openclaw => {
             println!("OpenClaw does not expose lifecycle hooks — only HTTP webhooks.");
             println!("ai-memory cannot wire automatic capture against OpenClaw today.");
@@ -390,26 +403,12 @@ fn merge_gemini_hooks(
 
 /// Generate an OpenCode plugin at `~/.config/opencode/plugins/ai-memory.ts`.
 ///
-/// Unlike Claude Code / Codex / Cursor / Gemini, OpenCode's lifecycle
-/// hooks aren't JSON config — they're TypeScript modules under
-/// `~/.config/opencode/plugins/` (per
-/// <https://opencode.ai/docs/plugins/>). A plugin exports an
-/// async function returning a hooks object; the keys are
-/// dot-separated event names (`session.created`, `tool.execute.before`,
-/// etc.) and the values are async handlers.
-///
-/// Event mapping (OpenCode → ai-memory):
-///   session.created      → session-start.sh
-///   session.idle         → stop.sh
-///   session.compacted    → pre-compact.sh
-///   tool.execute.before  → pre-tool-use.sh
-///   tool.execute.after   → post-tool-use.sh
-///
-/// OpenCode doesn't expose a `prompt-submit` equivalent or a
-/// `session.ended` event (idle is the closest). We forward what
-/// we can.
+/// OpenCode's integration surface is a TypeScript plugin, not a JSON
+/// hook table. The plugin posts normalized lifecycle payloads directly
+/// to `/hook` and injects pending handoffs through
+/// `experimental.chat.system.transform`, because plugin shell stdout is
+/// not prepended to the model context the way Claude Code hook stdout is.
 fn apply_to_opencode_plugin(
-    hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
     args: &InstallHooksArgs,
@@ -423,64 +422,7 @@ fn apply_to_opencode_plugin(
             .join("plugins")
             .join("ai-memory.ts"),
     };
-    let staged = stage_hook_scripts(hooks_dir, "opencode")?;
-    let script = |name: &str| staged.join(name).to_string_lossy().into_owned();
-    let token_line = auth_token
-        .map(|t| format!("const TOKEN = {};\n", ts_string_literal(t)))
-        .unwrap_or_else(|| "const TOKEN = null;\n".to_string());
-    let body = format!(
-        r#"// Auto-generated by `ai-memory install-hooks --agent open-code --apply`.
-// Edit by re-running the command, not by hand — install-hooks
-// will overwrite this file (with a `.bak-<ts>` backup) on each
-// re-run.
-
-import type {{ Plugin }} from "@opencode-ai/plugin";
-
-const SERVER = {server_literal};
-{token_line}
-async function fire(
-  $: any,
-  script: string,
-  event: string,
-  payload: unknown,
-): Promise<void> {{
-  // The hook scripts read JSON from stdin + AI_MEMORY_HOOK_URL/
-  // AI_MEMORY_AUTH_TOKEN from env. Inline the env into the shell
-  // command via POSIX `VAR=val cmd` syntax so we don't depend on
-  // the runtime's env-passing semantics.
-  const body = JSON.stringify({{
-    hook_event_name: event,
-    agent: "open-code",
-    payload,
-  }});
-  try {{
-    const authPrefix = TOKEN ? `AI_MEMORY_AUTH_TOKEN=${{TOKEN}} ` : "";
-    await $`echo ${{body}} | env AI_MEMORY_HOOK_URL=${{SERVER}} ${{authPrefix}}${{script}}`
-      .nothrow()
-      .quiet();
-  }} catch (_e) {{
-    // Fire-and-forget. Hooks must never block the agent.
-  }}
-}}
-
-export const AiMemoryHooks: Plugin = async ({{ $ }}) => {{
-  return {{
-    "session.created": async (input) => fire($, {session_start}, "session-start", input),
-    "session.idle":    async (input) => fire($, {stop},          "stop", input),
-    "session.compacted": async (input) => fire($, {pre_compact}, "pre-compact", input),
-    "tool.execute.before": async (input) => fire($, {pre_tool},  "pre-tool-use", input),
-    "tool.execute.after":  async (input) => fire($, {post_tool}, "post-tool-use", input),
-  }};
-}};
-"#,
-        server_literal = ts_string_literal(server_url),
-        token_line = token_line,
-        session_start = ts_string_literal(&script("session-start.sh")),
-        stop = ts_string_literal(&script("stop.sh")),
-        pre_compact = ts_string_literal(&script("pre-compact.sh")),
-        pre_tool = ts_string_literal(&script("pre-tool-use.sh")),
-        post_tool = ts_string_literal(&script("post-tool-use.sh")),
-    );
+    let body = build_opencode_plugin(server_url, auth_token);
 
     let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
     println!(
@@ -500,6 +442,206 @@ export const AiMemoryHooks: Plugin = async ({{ $ }}) => {{
         println!("new plugin to take effect.");
     }
     Ok(())
+}
+
+fn render_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> Result<()> {
+    println!("// OpenCode plugin — write to ~/.config/opencode/plugins/ai-memory.ts");
+    println!("// Or re-run with `--apply` to install it automatically.");
+    println!("// Restart OpenCode after changing plugins; config is loaded at startup.");
+    println!();
+    println!("{}", build_opencode_plugin(server_url, auth_token));
+    Ok(())
+}
+
+fn build_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> String {
+    let token_line = auth_token
+        .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
+        .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    format!(
+        r#"// Auto-generated by `ai-memory install-hooks --agent opencode --apply`.
+// Edit by re-running the command, not by hand — install-hooks
+// will overwrite this file (with a `.bak-<ts>` backup) on each
+// re-run.
+
+import type {{ Plugin }} from "@opencode-ai/plugin";
+
+const SERVER = {server_literal}.replace(/\/+$/, "");
+const AGENT = "open-code";
+{token_line}
+
+function timeoutSignal(ms: number): AbortSignal | undefined {{
+  if (typeof AbortSignal === "undefined") return undefined;
+  const factory = (AbortSignal as unknown as {{ timeout?: (ms: number) => AbortSignal }}).timeout;
+  return factory ? factory(ms) : undefined;
+}}
+
+function authHeaders(): Record<string, string> {{
+  return TOKEN ? {{ Authorization: `Bearer ${{TOKEN}}` }} : {{}};
+}}
+
+function sessionID(input: unknown): string | undefined {{
+  const value = input as any;
+  return value?.sessionID ?? value?.sessionId ?? value?.session_id ?? value?.info?.id;
+}}
+
+function textFromParts(parts: unknown): string {{
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .map((part: any) => {{
+      if (part?.type === "text" && typeof part.text === "string") return part.text;
+      if (part?.type === "subtask" && typeof part.prompt === "string") return part.prompt;
+      if (part?.type === "file" && typeof part.filename === "string") return `[file: ${{part.filename}}]`;
+      return "";
+    }})
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}}
+
+const sessionCwds = new Map<string, string>();
+const startedSessions = new Set<string>();
+const handoffChecked = new Set<string>();
+const preCompactLast = new Map<string, number>();
+
+function cwdFor(id: string | undefined, directory: string): string {{
+  return (id && sessionCwds.get(id)) || directory;
+}}
+
+function rememberCwd(id: string | undefined, cwd: string | undefined): void {{
+  if (id && cwd) sessionCwds.set(id, cwd);
+}}
+
+function startSession(id: string | undefined, cwd: string, extra: Record<string, unknown> = {{}}): void {{
+  if (!id || startedSessions.has(id)) return;
+  startedSessions.add(id);
+  rememberCwd(id, cwd);
+  postHook("session-start", {{ sessionID: id, cwd, ...extra }});
+}}
+
+function postPreCompact(id: string | undefined, directory: string): void {{
+  startSession(id, cwdFor(id, directory));
+  const key = id || "unknown";
+  const now = Date.now();
+  const last = preCompactLast.get(key) ?? 0;
+  if (now - last < 1000) return;
+  preCompactLast.set(key, now);
+  postHook("pre-compact", {{ sessionID: id, cwd: cwdFor(id, directory) }});
+}}
+
+function postHook(event: string, payload: Record<string, unknown>): void {{
+  const url = new URL(`${{SERVER}}/hook`);
+  url.searchParams.set("event", event);
+  url.searchParams.set("agent", AGENT);
+  try {{
+    void fetch(url, {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json", ...authHeaders() }},
+      body: JSON.stringify(payload),
+      signal: timeoutSignal(500),
+    }}).catch(() => undefined);
+  }} catch (_e) {{
+    // Fire-and-forget. Hooks must never block the agent.
+  }}
+}}
+
+async function fetchHandoff(cwd: string): Promise<string | undefined> {{
+  const url = new URL(`${{SERVER}}/handoff`);
+  url.searchParams.set("agent", AGENT);
+  url.searchParams.set("cwd", cwd);
+  try {{
+    const response = await fetch(url, {{
+      headers: authHeaders(),
+      signal: timeoutSignal(1000),
+    }});
+    const text = (await response.text()).trim();
+    return text.length > 0 ? text : undefined;
+  }} catch (_e) {{
+    return undefined;
+  }}
+}}
+
+export const AiMemoryHooks: Plugin = async ({{ directory }}) => {{
+  return {{
+    event: async (input) => {{
+      const event = (input as any).event;
+      const properties = event?.properties ?? {{}};
+      if (event?.type === "session.created") {{
+        const info = properties.info ?? {{}};
+        const id = properties.sessionID ?? info.id;
+        const cwd = info.directory ?? directory;
+        startSession(id, cwd, {{
+          title: info.title,
+          projectID: info.projectID,
+        }});
+      }}
+      if (event?.type === "session.idle") {{
+        const id = properties.sessionID;
+        startSession(id, cwdFor(id, directory));
+        postHook("stop", {{ sessionID: id, cwd: cwdFor(id, directory) }});
+      }}
+      if (event?.type === "session.compacted") {{
+        const id = properties.sessionID;
+        postPreCompact(id, directory);
+      }}
+    }},
+    "chat.message": async (input, output) => {{
+      const id = sessionID(input);
+      const cwd = cwdFor(id, directory);
+      startSession(id, cwd, {{ agent: (input as any).agent, model: (input as any).model }});
+      postHook("user-prompt", {{
+        sessionID: id,
+        cwd,
+        agent: (input as any).agent,
+        model: (input as any).model,
+        messageID: (input as any).messageID,
+        prompt: textFromParts((output as any).parts),
+      }});
+    }},
+    "tool.execute.before": async (input, output) => {{
+      const id = sessionID(input);
+      startSession(id, cwdFor(id, directory));
+      postHook("pre-tool-use", {{
+        sessionID: id,
+        cwd: cwdFor(id, directory),
+        tool: (input as any).tool,
+        callID: (input as any).callID,
+        args: (output as any).args,
+      }});
+    }},
+    "tool.execute.after": async (input, output) => {{
+      const id = sessionID(input);
+      startSession(id, cwdFor(id, directory));
+      postHook("post-tool-use", {{
+        sessionID: id,
+        cwd: cwdFor(id, directory),
+        tool: (input as any).tool,
+        callID: (input as any).callID,
+        args: (input as any).args,
+        title: (output as any).title,
+        output: (output as any).output,
+        metadata: (output as any).metadata,
+      }});
+    }},
+    "experimental.session.compacting": async (input) => {{
+      const id = sessionID(input);
+      postPreCompact(id, directory);
+    }},
+    "experimental.chat.system.transform": async (input, output) => {{
+      const id = sessionID(input);
+      if (!id || handoffChecked.has(id)) return;
+      handoffChecked.add(id);
+      startSession(id, cwdFor(id, directory));
+      const handoff = await fetchHandoff(cwdFor(id, directory));
+      if (handoff) (output as any).system.push(handoff);
+    }},
+  }};
+}};
+
+export default AiMemoryHooks;
+"#,
+        server_literal = ts_string_literal(server_url),
+        token_line = token_line,
+    )
 }
 
 /// Emit a TypeScript string literal containing `s`. Escapes
@@ -732,6 +874,51 @@ mod tests {
                 fs::set_permissions(&p, perms).unwrap();
             }
         }
+    }
+
+    // ----------------------------------------------------------------
+    // OpenCode tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn opencode_plugin_uses_real_plugin_hooks() {
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"));
+
+        assert!(plugin.contains("event: async (input)"));
+        assert!(plugin.contains(r#""chat.message": async"#));
+        assert!(plugin.contains(r#""tool.execute.before": async"#));
+        assert!(plugin.contains(r#""tool.execute.after": async"#));
+        assert!(plugin.contains(r#""experimental.chat.system.transform": async"#));
+        assert!(plugin.contains("export default AiMemoryHooks"));
+        assert!(plugin.contains("const startedSessions = new Set<string>();"));
+        assert!(plugin.contains("function startSession"));
+        assert!(plugin.contains("fetchHandoff"));
+        assert!(plugin.contains("postPreCompact"));
+        assert!(plugin.contains("postHook(\"session-start\""));
+        assert!(plugin.contains("postHook(\"user-prompt\""));
+        assert!(plugin.contains("Bearer ${TOKEN}"));
+        assert!(plugin.contains("tok"));
+        assert!(
+            !plugin.contains(r#""session.created": async"#),
+            "OpenCode bus events must be handled through the `event` hook"
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_normalizes_payloads_without_legacy_wrapper() {
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374/", None);
+
+        assert!(plugin.contains("const SERVER = \"http://127.0.0.1:49374/\".replace"));
+        assert!(plugin.contains("const TOKEN: string | null = null;"));
+        assert!(plugin.contains("sessionID: id,"));
+        assert!(plugin.contains("cwd,"));
+        assert!(plugin.contains("prompt: textFromParts"));
+        assert!(plugin.contains("output: (output as any).output"));
+        assert!(plugin.contains("if (typeof AbortSignal === \"undefined\")"));
+        assert!(
+            !plugin.contains("hook_event_name"),
+            "new plugin should send normalized top-level fields, not legacy wrappers"
+        );
     }
 
     // ----------------------------------------------------------------

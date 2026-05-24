@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use ai_memory_consolidate::Consolidator;
-use ai_memory_core::Sanitizer;
+use ai_memory_core::{ActiveProject, ProjectId, Sanitizer, WorkspaceId};
 use ai_memory_hooks::{HookState, hook_router};
-use ai_memory_llm::{build_embedder, build_provider, embedder_from_env, provider_from_env};
+use ai_memory_llm::{Embedder, LlmProvider, build_embedder, build_provider};
 use ai_memory_mcp::{AdminState, AiMemoryServer, admin_router};
-use ai_memory_store::Store;
+use ai_memory_store::{ReaderPool, Store};
 use ai_memory_web;
 use ai_memory_wiki::{WatcherHandle, Wiki, migrations, run_wiki_migrations};
 use anyhow::{Context, Result};
@@ -35,6 +35,12 @@ use crate::config::Config;
 /// 10 MB is generous headroom; without a cap, axum streams unbounded
 /// bodies into memory (audit critical #2).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+struct ConsolidatorSetup {
+    server: AiMemoryServer,
+    consolidator: Option<Arc<Consolidator>>,
+    admin_llm: Option<Arc<dyn LlmProvider>>,
+}
 
 /// Run the `serve` subcommand.
 ///
@@ -70,50 +76,11 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     // operators discover misconfiguration immediately.
     let sanitizer = Sanitizer::new(&config.sanitize)
         .context("compiling sanitizer.extra_patterns from config")?;
-    let mut wiki =
-        Wiki::new(&config.data_dir, store.writer.clone())?.with_sanitizer(sanitizer.clone());
-
-    // M9 — pluggable embedder. Refuse to start if any stored
-    // embeddings disagree with the configured (provider, model, dim).
-    let embedder = if let Some(cfg) = embedder_from_env()? {
-        let mismatch = store
-            .reader
-            .embedding_meta_for_mismatch(cfg.provider.name().into(), cfg.model.clone(), cfg.dim)
-            .await?;
-        if !mismatch.is_empty() {
-            anyhow::bail!(
-                "embedding (provider, model, dim) mismatch with stored data: {:?} \
-                 — run `ai-memory embed --reembed` to migrate",
-                mismatch
-            );
-        }
-        let e = build_embedder(cfg).context("building embedder from env")?;
-        info!(
-            provider = e.provider(),
-            model = e.model(),
-            dim = e.dim(),
-            "embedder enabled"
-        );
-        wiki = wiki.with_embedder(e.clone());
-        Some(e)
-    } else {
-        info!("AI_MEMORY_EMBEDDING_PROVIDER unset; hybrid search disabled (FTS5-only)");
-        None
-    };
+    let wiki = Wiki::new(&config.data_dir, store.writer.clone())?.with_sanitizer(sanitizer.clone());
+    let (wiki, embedder) = configure_embedder(config, &store, wiki).await?;
 
     // Keep the guard alive for the lifetime of `serve`.
-    let _watcher = if args.no_watcher {
-        info!("watcher disabled by --no-watcher");
-        None
-    } else {
-        info!(
-            root = %wiki.root().display(),
-            workspace = %args.workspace,
-            project = %args.project,
-            "starting wiki watcher",
-        );
-        Some(WatcherHandle::start(wiki.clone())?)
-    };
+    let _watcher = start_watcher(&args, &wiki)?;
 
     // Shared between the MCP server and the hook router: the hook
     // router publishes the cwd-resolved project on each event; the MCP
@@ -121,7 +88,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     // answers for the project the agent is actually in, not the static
     // `--project` (issue #2). In stdio mode no hook router is built, so
     // this stays empty and the baked-in default is used.
-    let active_project = ai_memory_core::ActiveProject::new();
+    let active_project = ActiveProject::new();
     let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
         .with_wiki(wiki.clone())
         .with_decay_params(config.decay)
@@ -130,36 +97,10 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     if let Some(e) = embedder.clone() {
         server = server.with_embedder(e);
     }
-    // Build the consolidator (if LLM configured) once, then share the
-    // Arc between the MCP server (for `memory_consolidate` + lint),
-    // the hook router (for PreCompact checkpointing), and the admin
-    // router (for `POST /admin/bootstrap`).
-    let mut admin_llm: Option<Arc<dyn ai_memory_llm::LlmProvider>> = None;
-    let consolidator: Option<Arc<Consolidator>> = if let Some(cfg) = provider_from_env()? {
-        let llm = build_provider(cfg).context("building LLM provider from env")?;
-        info!(
-            provider = llm.name(),
-            model = llm.model(),
-            "memory_consolidate + PreCompact LLM checkpointing enabled",
-        );
-        let c = Arc::new(Consolidator::new(
-            store.reader.clone(),
-            store.writer.clone(),
-            wiki.clone(),
-            llm.clone(),
-            ws,
-            proj,
-        ));
-        server = server.with_consolidator_arc(wiki.clone(), llm.clone(), c.clone());
-        admin_llm = Some(llm);
-        Some(c)
-    } else {
-        info!(
-            "AI_MEMORY_LLM_PROVIDER unset; memory_consolidate disabled, PreCompact \
-             falls back to rule-based checkpoint, lint runs rule-based only"
-        );
-        None
-    };
+    let consolidator_setup = configure_consolidator(config, server, &store, &wiki, ws, proj)?;
+    let server = consolidator_setup.server;
+    let consolidator = consolidator_setup.consolidator;
+    let admin_llm = consolidator_setup.admin_llm;
 
     match args.transport {
         TransportKind::Stdio => {
@@ -228,56 +169,15 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 bind: bind.clone(),
                 bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             });
-            // Build the auth state. Precedence (highest first):
-            //   1. AI_MEMORY_AUTH_TOKEN env var
-            //   2. config.toml [auth].bearer_token
-            //   3. neither → open mode (no auth)
-            // Read env directly (not via figment) to match the pattern
-            // used by AI_MEMORY_LLM_* in factory.rs — keeps the
-            // operator's mental model simple.
-            let token = std::env::var("AI_MEMORY_AUTH_TOKEN")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| config.auth.bearer_token.clone());
-            let auth_state = Arc::new(AuthState::new(token));
+            let auth_state = Arc::new(AuthState::new(config.auth.bearer_token.clone()));
             let auth_enabled = auth_state.enabled();
-            let mut router = axum::Router::new()
+            let router = axum::Router::new()
                 .nest_service("/mcp", mcp_service)
                 .merge(hooks)
                 .merge(admin);
-
-            // Register the web router BEFORE applying the bearer
-            // middleware. In axum 0.8, `.layer()` only attaches to
-            // routes registered before the call — nesting after the
-            // layer would silently bypass auth for /web/*.
-            if args.enable_web {
-                let web_router = ai_memory_web::router(store.reader.clone(), wiki.clone());
-                // Also accept the trailing-slash form. axum 0.8's
-                // `nest("/web", ..)` matches `/web` (no slash) → inner
-                // `route("/")` but doesn't match `/web/` (a browser's
-                // default when the user types the bare prefix), so we
-                // redirect that explicitly to keep both URLs working.
-                router = router
-                    .route(
-                        "/web/",
-                        axum::routing::get(|| async {
-                            axum::response::Redirect::permanent("/web")
-                        }),
-                    )
-                    .nest("/web", web_router);
-                info!("read-only wiki browser mounted at /web");
-            }
-
-            let router = router
-                .layer(axum::middleware::from_fn_with_state(
-                    auth_state,
-                    require_bearer,
-                ))
-                .layer(axum::middleware::from_fn_with_state(
-                    Arc::new(config.allowed_hosts.clone()),
-                    require_allowed_host,
-                ))
-                .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
+            let router =
+                mount_web_router(router, args.enable_web, store.reader.clone(), wiki.clone());
+            let router = apply_http_layers(router, auth_state, config.allowed_hosts.clone());
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("binding {bind}"))?;
@@ -309,6 +209,136 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn configure_embedder(
+    config: &Config,
+    store: &Store,
+    wiki: Wiki,
+) -> Result<(Wiki, Option<Arc<dyn Embedder>>)> {
+    // M9 — pluggable embedder. Refuse to start if any stored
+    // embeddings disagree with the configured (provider, model, dim).
+    let Some(cfg) = config.embedder_config()? else {
+        info!("AI_MEMORY_EMBEDDING_PROVIDER unset; hybrid search disabled (FTS5-only)");
+        return Ok((wiki, None));
+    };
+    let mismatch = store
+        .reader
+        .embedding_meta_for_mismatch(cfg.provider.name().into(), cfg.model.clone(), cfg.dim)
+        .await?;
+    if !mismatch.is_empty() {
+        anyhow::bail!(
+            "embedding (provider, model, dim) mismatch with stored data: {:?} \
+             — run `ai-memory embed --reembed` to migrate",
+            mismatch
+        );
+    }
+    let embedder = build_embedder(cfg).context("building embedder from config")?;
+    info!(
+        provider = embedder.provider(),
+        model = embedder.model(),
+        dim = embedder.dim(),
+        "embedder enabled"
+    );
+    Ok((wiki.with_embedder(embedder.clone()), Some(embedder)))
+}
+
+fn start_watcher(args: &ServeArgs, wiki: &Wiki) -> Result<Option<WatcherHandle>> {
+    if args.no_watcher {
+        info!("watcher disabled by --no-watcher");
+        return Ok(None);
+    }
+    info!(
+        root = %wiki.root().display(),
+        workspace = %args.workspace,
+        project = %args.project,
+        "starting wiki watcher",
+    );
+    Ok(Some(WatcherHandle::start(wiki.clone())?))
+}
+
+fn configure_consolidator(
+    config: &Config,
+    mut server: AiMemoryServer,
+    store: &Store,
+    wiki: &Wiki,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+) -> Result<ConsolidatorSetup> {
+    // Build the consolidator (if LLM configured) once, then share the
+    // Arc between the MCP server (for `memory_consolidate` + lint),
+    // the hook router (for PreCompact checkpointing), and the admin
+    // router (for `POST /admin/bootstrap`).
+    let Some(cfg) = config.llm_provider_config()? else {
+        info!(
+            "AI_MEMORY_LLM_PROVIDER unset; memory_consolidate disabled, PreCompact \
+             falls back to rule-based checkpoint, lint runs rule-based only"
+        );
+        return Ok(ConsolidatorSetup {
+            server,
+            consolidator: None,
+            admin_llm: None,
+        });
+    };
+    let llm = build_provider(cfg).context("building LLM provider from config")?;
+    info!(
+        provider = llm.name(),
+        model = llm.model(),
+        "memory_consolidate + PreCompact LLM checkpointing enabled",
+    );
+    let consolidator = Arc::new(Consolidator::new(
+        store.reader.clone(),
+        store.writer.clone(),
+        wiki.clone(),
+        llm.clone(),
+        workspace_id,
+        project_id,
+    ));
+    server = server.with_consolidator_arc(wiki.clone(), llm.clone(), consolidator.clone());
+    Ok(ConsolidatorSetup {
+        server,
+        consolidator: Some(consolidator),
+        admin_llm: Some(llm),
+    })
+}
+
+fn mount_web_router(
+    router: axum::Router,
+    enable_web: bool,
+    reader: ReaderPool,
+    wiki: Wiki,
+) -> axum::Router {
+    if !enable_web {
+        return router;
+    }
+    // Register the web router BEFORE applying the bearer middleware. In
+    // axum 0.8, `.layer()` only attaches to routes registered before the
+    // call; nesting after the layer would silently bypass auth for /web/*.
+    let web_router = ai_memory_web::router(reader, wiki);
+    info!("read-only wiki browser mounted at /web");
+    router
+        .route(
+            "/web/",
+            axum::routing::get(|| async { axum::response::Redirect::permanent("/web") }),
+        )
+        .nest("/web", web_router)
+}
+
+fn apply_http_layers(
+    router: axum::Router,
+    auth_state: Arc<AuthState>,
+    allowed_hosts: Vec<String>,
+) -> axum::Router {
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_bearer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(allowed_hosts),
+            require_allowed_host,
+        ))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 async fn require_allowed_host(
@@ -353,6 +383,9 @@ fn host_without_port(host: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Request;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
 
     #[test]
     fn host_allowed_accepts_host_with_port() {
@@ -370,5 +403,31 @@ mod tests {
     #[test]
     fn host_without_port_handles_ipv6_loopback() {
         assert_eq!(host_without_port("[::1]:49374"), "::1");
+    }
+
+    #[tokio::test]
+    async fn web_routes_are_inside_auth_layer() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let router = mount_web_router(axum::Router::new(), true, store.reader.clone(), wiki);
+        let router = apply_http_layers(
+            router,
+            Arc::new(AuthState::new(Some("secret".to_string()))),
+            vec!["localhost".to_string()],
+        );
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/web")
+                    .header("Host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -25,11 +25,10 @@ use crate::http_client::{ServerEndpoint, post_json};
 /// bundle to the server's `POST /admin/bootstrap` endpoint.
 ///
 /// # Errors
-/// Bails when `AI_MEMORY_SERVER_URL` is unset, when the resolved repo
-/// path is not a git repo, when source collection fails, or when the
-/// server returns a non-2xx response.
-pub async fn run(_config: &Config, args: BootstrapArgs) -> Result<()> {
-    let ep = ServerEndpoint::from_env();
+/// Bails when the resolved repo path cannot be inspected, when source
+/// collection fails, or when the server returns a non-2xx response.
+pub async fn run(config: &Config, args: BootstrapArgs) -> Result<()> {
+    let ep = ServerEndpoint::from_config(config);
     info!(server = %ep.url, auth = ep.auth_token.is_some(), "bootstrap CLI configured");
 
     // ---- repo path — auto-detect via libgit2, fall back to CWD ----
@@ -71,7 +70,7 @@ pub async fn run(_config: &Config, args: BootstrapArgs) -> Result<()> {
     }
 
     // ---- project — auto-derive from repo basename if absent -------
-    let project = super::resolve_project_name(args.project.as_deref())?;
+    let project = super::resolve_project_name(config, args.project.as_deref())?;
     info!(workspace = %args.workspace, project = %project, repo_path = %repo_path.display(), git = has_git, "bootstrap target");
 
     // ---- collect sources locally ----------------------------------

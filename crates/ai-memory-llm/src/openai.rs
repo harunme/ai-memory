@@ -10,6 +10,7 @@ use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
 use crate::provider::LlmProvider;
+use crate::text::truncate_with_ellipsis;
 use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 
 /// Default OpenAI API base.
@@ -242,18 +243,10 @@ impl OpenAiProvider {
             let body = resp.text().await.unwrap_or_default();
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate(&body, 1024),
+                body: truncate_with_ellipsis(&body, 1024),
             });
         }
         resp.json::<OpenAiResponse>().await.map_err(LlmError::from)
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
     }
 }
 

@@ -2,7 +2,6 @@
 
 use ai_memory_llm::{ChatRequest, ProviderChoice, ProviderConfig, build_provider};
 use anyhow::{Context, Result};
-use secrecy::SecretString;
 use tracing::info;
 
 use crate::cli::{LlmProviderChoice, LlmTestArgs};
@@ -13,16 +12,20 @@ use crate::config::Config;
 /// # Errors
 /// Returns an error if the provider cannot be constructed, the env
 /// lacks the required keys, or the HTTP call fails.
-pub async fn run(_config: &Config, args: LlmTestArgs) -> Result<()> {
+pub async fn run(config: &Config, args: LlmTestArgs) -> Result<()> {
     let provider = ProviderChoice::from(args.provider);
-    let api_key = resolve_api_key(args.api_key, provider);
-    let config = ProviderConfig {
+    let api_key = args
+        .api_key
+        .filter(|s| !s.is_empty())
+        .map(secrecy::SecretString::from)
+        .or_else(|| config.provider_api_key(provider));
+    let provider_config = ProviderConfig {
         provider,
         model: args.model,
         api_key,
-        base_url: args.base_url,
+        base_url: args.base_url.or_else(|| config.llm_test_base_url()),
     };
-    let client = build_provider(config).context("building LLM provider")?;
+    let client = build_provider(provider_config).context("building LLM provider")?;
     info!(
         provider = client.name(),
         model = client.model(),
@@ -42,20 +45,6 @@ pub async fn run(_config: &Config, args: LlmTestArgs) -> Result<()> {
     }
     println!("{}", resp.text);
     Ok(())
-}
-
-fn resolve_api_key(explicit: Option<String>, provider: ProviderChoice) -> Option<SecretString> {
-    if let Some(s) = explicit
-        && !s.is_empty()
-    {
-        return Some(SecretString::from(s));
-    }
-    let env_name = match provider {
-        ProviderChoice::Anthropic => "ANTHROPIC_API_KEY",
-        ProviderChoice::OpenAi => "OPENAI_API_KEY",
-        ProviderChoice::OpenAiCompat => "LLM_API_KEY",
-    };
-    std::env::var(env_name).ok().map(SecretString::from)
 }
 
 impl From<LlmProviderChoice> for ProviderChoice {

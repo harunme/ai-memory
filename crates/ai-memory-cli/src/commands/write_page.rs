@@ -37,7 +37,7 @@ struct WritePageResponseBody {
 /// # Errors
 /// Returns an error if stdin cannot be read (when `body == "-"`), or if
 /// the POST to `/admin/write-page` fails.
-pub async fn run(_config: &Config, args: WritePageArgs) -> Result<()> {
+pub async fn run(config: &Config, args: WritePageArgs) -> Result<()> {
     let body_text = if args.body == "-" {
         let mut buf = String::new();
         std::io::stdin()
@@ -53,7 +53,7 @@ pub async fn run(_config: &Config, args: WritePageArgs) -> Result<()> {
     // for commands whose project arg is truly optional (no default).
     let project = args.project.clone();
 
-    let endpoint = ServerEndpoint::from_env();
+    let endpoint = ServerEndpoint::from_config(config);
     let resp: WritePageResponseBody = post_json(
         &endpoint,
         "/admin/write-page",
