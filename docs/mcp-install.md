@@ -5,6 +5,17 @@
 > `Authorization: Bearer <token>` header to the `headers` block when bearer auth
 > is enabled. The MCP wire protocol expects the `/mcp` path suffix on the URL.
 
+> **Transport is stateless by default.** Since v0.1.2 the HTTP transport
+> answers each request independently (plain JSON, no `Mcp-Session-Id`
+> required), so any client that points a remote URL at `/mcp` — including
+> OpenCode `type: "remote"` and plain `curl` — works without an
+> `mcp-remote` stdio shim (issue #3). The `mcp-remote` bridge is still
+> needed for **Claude Desktop** specifically, because its config only
+> supports stdio servers — not because of session state. If you run a
+> client that *requires* MCP session continuity or server-initiated SSE
+> streams, start the server with `ai-memory serve --transport http
+> --http-stateful` to restore rmcp's session mode.
+
 This page documents how to register ai-memory as an MCP server with
 the agent CLIs **that are not covered inline in the README**.
 

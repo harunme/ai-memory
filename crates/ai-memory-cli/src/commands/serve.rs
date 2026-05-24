@@ -181,12 +181,27 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 allowed_hosts = ?config.allowed_hosts,
                 "MCP Host-header allowlist"
             );
+            // Default to stateless Streamable HTTP: each POST is serviced
+            // independently and answered as plain `application/json`, so
+            // stateless clients (OpenCode `type: "remote"`, curl) work
+            // without an `mcp-remote` shim (issue #3). ai-memory's tools
+            // are pure request-response and project resolution rides the
+            // in-process `ActiveProject` pointer, not the transport
+            // session — so session mode buys us nothing. `--http-stateful`
+            // restores rmcp's session+SSE behaviour for clients that want
+            // it.
+            info!(
+                stateful = args.http_stateful,
+                "MCP Streamable HTTP transport mode"
+            );
             let mcp_service = StreamableHttpService::new(
                 move || Ok(server_clone.clone()),
                 LocalSessionManager::default().into(),
                 StreamableHttpServerConfig::default()
                     .with_cancellation_token(cancel.child_token())
-                    .with_allowed_hosts(config.allowed_hosts.clone()),
+                    .with_allowed_hosts(config.allowed_hosts.clone())
+                    .with_stateful_mode(args.http_stateful)
+                    .with_json_response(!args.http_stateful),
             );
             let hooks = hook_router(HookState {
                 workspace_id: ws,

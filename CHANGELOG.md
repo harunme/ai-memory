@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- HTTP transport now defaults to **stateless** mode (`json_response`, no
+  `Mcp-Session-Id` required), so stateless MCP clients (OpenCode
+  `type: "remote"`, `curl`) work without an `mcp-remote` stdio shim
+  ([#3]). New `serve --transport http --http-stateful` flag restores the
+  previous session+SSE behaviour for clients that need it.
+
 ## [0.1.1] - 2026-05-24
 
 ### Added

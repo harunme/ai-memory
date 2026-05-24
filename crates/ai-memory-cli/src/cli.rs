@@ -576,6 +576,16 @@ pub struct ServeArgs {
     /// proxy that handles its own auth if you expose it.
     #[arg(long)]
     pub enable_web: bool,
+    /// Run the HTTP transport in stateful (session) mode: the server
+    /// issues an `Mcp-Session-Id` on `initialize` and requires it on
+    /// every later request, with SSE-framed responses. Off by default —
+    /// the HTTP transport is stateless and returns plain JSON, so
+    /// stateless clients (OpenCode `type: "remote"`, `curl`) work without
+    /// an `mcp-remote` stdio shim (issue #3). Enable this only for
+    /// clients that need session continuity or server-initiated SSE
+    /// streams. No effect on `--transport stdio`.
+    #[arg(long)]
+    pub http_stateful: bool,
 }
 
 /// Arguments for `write-page`.
