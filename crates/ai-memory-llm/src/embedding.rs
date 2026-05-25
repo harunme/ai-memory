@@ -1,9 +1,10 @@
 //! Embedding provider abstraction.
 //!
-//! Three implementations ship in M9:
+//! Embedding implementations ship in M9:
 //!
 //! * [`OpenAiEmbedder`] — production: hits OpenAI's `/v1/embeddings`.
 //! * [`VoyageEmbedder`] — production: hits Voyage's `/v1/embeddings`.
+//! * [`GoogleEmbedder`](crate::google::GoogleEmbedder) — Gemini `embedContent`.
 //! * [`SyntheticEmbedder`] — test-only: deterministic bag-of-words
 //!   embedding so integration tests can demonstrate semantic
 //!   retrieval without an API key.
@@ -41,6 +42,16 @@ pub trait Embedder: Send + Sync {
     /// Embed one text. Returns a unit-normalised vector — callers can
     /// dot-product directly to get cosine similarity.
     async fn embed(&self, text: &str) -> LlmResult<Vec<f32>>;
+
+    /// Embed wiki page / document body (hybrid index writes).
+    async fn embed_document(&self, text: &str) -> LlmResult<Vec<f32>> {
+        self.embed(text).await
+    }
+
+    /// Embed a search query (hybrid retrieval).
+    async fn embed_query(&self, text: &str) -> LlmResult<Vec<f32>> {
+        self.embed(text).await
+    }
 }
 
 /// OpenAI Embeddings API (`text-embedding-3-small` by default, 1536 dim).
@@ -307,7 +318,7 @@ impl Embedder for SyntheticEmbedder {
 }
 
 /// Unit-normalise so dot-product equals cosine similarity.
-fn normalise(mut v: Vec<f32>) -> Vec<f32> {
+pub(crate) fn normalise(mut v: Vec<f32>) -> Vec<f32> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         for x in &mut v {

@@ -58,7 +58,7 @@ pub struct Config {
     pub llm_model: Option<String>,
     /// Optional LLM base URL override.
     pub llm_base_url: Option<String>,
-    /// Optional embedding provider (`openai`, `voyage`).
+    /// Optional embedding provider (`openai`, `voyage`, `google` / `gemini`).
     pub embedding_provider: Option<String>,
     /// Optional embedding model override.
     pub embedding_model: Option<String>,
@@ -346,9 +346,10 @@ impl Config {
         let provider = match provider_raw {
             "openai" => EmbedderChoice::OpenAi,
             "voyage" => EmbedderChoice::Voyage,
+            "google" | "gemini" => EmbedderChoice::Google,
             other => {
                 return Err(LlmError::NotConfigured(format!(
-                    "AI_MEMORY_EMBEDDING_PROVIDER={other} not one of openai|voyage"
+                    "AI_MEMORY_EMBEDDING_PROVIDER={other} not one of openai|voyage|google|gemini"
                 )));
             }
         };
@@ -357,6 +358,7 @@ impl Config {
             None => match provider {
                 EmbedderChoice::OpenAi => "text-embedding-3-small".to_string(),
                 EmbedderChoice::Voyage => "voyage-3".to_string(),
+                EmbedderChoice::Google => ai_memory_llm::GOOGLE_DEFAULT_EMBED_MODEL.to_string(),
             },
         };
         let dim = self
@@ -373,6 +375,13 @@ impl Config {
                 .voyage_api_key
                 .clone()
                 .ok_or_else(|| LlmError::NotConfigured("VOYAGE_API_KEY".into()))?,
+            EmbedderChoice::Google => self
+                .runtime_env
+                .gemini_api_key
+                .clone()
+                .ok_or_else(|| {
+                    LlmError::NotConfigured("GEMINI_API_KEY or GOOGLE_API_KEY".into())
+                })?,
         };
         Ok(Some(EmbedderConfig {
             provider,

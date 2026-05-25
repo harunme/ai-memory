@@ -27,6 +27,7 @@ pub mod embedding;
 pub mod error;
 pub mod factory;
 pub mod gemini;
+pub mod google;
 pub mod openai;
 pub mod openai_compat;
 pub mod provider;
@@ -42,6 +43,7 @@ pub use factory::{
     default_embedding_dim,
 };
 pub use gemini::GeminiProvider;
+pub use google::{GoogleEmbedder, DEFAULT_MODEL as GOOGLE_DEFAULT_EMBED_MODEL};
 pub use openai::OpenAiProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use provider::{LlmProvider, complete_structured};

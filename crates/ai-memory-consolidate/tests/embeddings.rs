@@ -125,7 +125,7 @@ async fn m9_embeddings_roundtrip_via_synthetic() {
 
     // 3. Hybrid search end-to-end.
     let q = "karpathy compile artifact";
-    let qv = embedder.embed(q).await.expect("embed query");
+    let qv = embedder.embed_query(q).await.expect("embed query");
     let hybrid_hits = store
         .reader
         .hybrid_search(

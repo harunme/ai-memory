@@ -12,6 +12,7 @@ use crate::GeminiProvider;
 use crate::OpenAiCompatProvider;
 use crate::OpenAiProvider;
 use crate::embedding::{Embedder, OpenAiEmbedder, VoyageEmbedder};
+use crate::google::GoogleEmbedder;
 use crate::error::{LlmError, LlmResult};
 use crate::provider::LlmProvider;
 
@@ -41,13 +42,15 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
 }
 
-/// Three embedders ship in v0.2.
+/// Embedding providers available to ai-memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedderChoice {
     /// OpenAI Embeddings API.
     OpenAi,
     /// Voyage Embeddings API.
     Voyage,
+    /// Google Gemini Embeddings API (`embedContent`).
+    Google,
 }
 
 impl EmbedderChoice {
@@ -58,6 +61,7 @@ impl EmbedderChoice {
         match self {
             Self::OpenAi => "openai",
             Self::Voyage => "voyage",
+            Self::Google => "google",
         }
     }
 }
@@ -98,6 +102,13 @@ pub fn build_embedder(config: EmbedderConfig) -> LlmResult<Arc<dyn Embedder>> {
             }
             Arc::new(e)
         }
+        EmbedderChoice::Google => {
+            let mut e = GoogleEmbedder::new(config.api_key, config.model, config.dim)?;
+            if let Some(url) = config.base_url {
+                e = e.with_base_url(url);
+            }
+            Arc::new(e)
+        }
     };
     Ok(arc)
 }
@@ -113,6 +124,9 @@ pub fn default_embedding_dim(provider: EmbedderChoice, model: &str) -> u32 {
         (EmbedderChoice::OpenAi, _) => 1536,
         (EmbedderChoice::Voyage, "voyage-3-large") => 1024,
         (EmbedderChoice::Voyage, _) => 1024,
+        (EmbedderChoice::Google, "gemini-embedding-2") => 768,
+        (EmbedderChoice::Google, "gemini-embedding-001") => 768,
+        (EmbedderChoice::Google, _) => 768,
     }
 }
 
