@@ -1260,7 +1260,7 @@ mod tests {
     /// `memory_briefing` when hooks publish `ActiveProject` (issue #2).
     #[tokio::test]
     async fn handoff_begin_pending_count_matches_briefing_active_project() {
-        let (_tmp, store, mut server, ws, baked) = setup_server().await;
+        let (_tmp, store, server, ws, baked) = setup_server().await;
         let active = store
             .writer
             .get_or_create_project(ws, "ai-memory", Some(r"C:\GIT\ai-memory".into()))

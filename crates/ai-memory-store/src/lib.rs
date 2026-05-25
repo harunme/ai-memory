@@ -352,6 +352,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_boolean_or_still_works() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "quick.md", "quick answer"))
+            .await
+            .unwrap();
+
+        let hits = store
+            .reader
+            .search_pages("quick OR slow".into(), 10)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty(), "OR must remain an FTS5 operator");
+    }
+
+    #[tokio::test]
     async fn search_quotes_hyphenated_tokens_for_fts5() {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();

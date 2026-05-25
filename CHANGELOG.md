@@ -57,6 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker images now bundle both POSIX and PowerShell hook scripts.
 
 ### Fixed
+- Session capture now persists every documented agent kind (`cursor`,
+  `gemini-cli`, `claude-desktop`, `openclaw`, `omp` / `pi`) instead of
+  failing the `sessions.agent_kind` database CHECK for agents added after
+  the initial schema.
+- `memory_handoff_begin` and `memory_handoff_accept` now resolve the active
+  project the same way the briefing/search tools do, so MCP handoffs land in
+  the project currently reported by hooks instead of the server's baked
+  default project.
+- Natural-language `memory_query` text containing bare colons, such as
+  `pick: handoff`, no longer trips FTS5 column syntax errors while explicit
+  FTS operators like `quick OR slow` remain supported.
 - Marker-file routing now reaches the generated OpenCode and OMP
   TypeScript hook integrations, not only the POSIX/PowerShell script
   hooks. POSIX helpers also preserve the outer hook `cwd` when nested

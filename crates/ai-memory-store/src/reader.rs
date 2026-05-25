@@ -361,7 +361,10 @@ impl ReaderPool {
         query: String,
         limit: usize,
     ) -> StoreResult<Vec<PageHitWithMeta>> {
-        let query = normalize_fts_query(&query);
+        let fts_query = normalize_fts_query(&query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT workspaces.name, projects.name, pages.path, pages.title, \
@@ -376,7 +379,7 @@ impl ReaderPool {
                  LIMIT ?2",
             )?;
             #[allow(clippy::cast_possible_wrap)]
-            let rows = stmt.query_map(params![query, limit as i64], |row| {
+            let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
                 let workspace_name: String = row.get(0)?;
                 let project_name: String = row.get(1)?;
                 let path: String = row.get(2)?;
@@ -477,7 +480,10 @@ impl ReaderPool {
         query: String,
         limit: usize,
     ) -> StoreResult<Vec<ObservationHit>> {
-        let query = normalize_fts_query(&query);
+        let fts_query = normalize_fts_query(&query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT observations.id, observations.session_id, observations.kind, \
@@ -495,7 +501,7 @@ impl ReaderPool {
             #[allow(clippy::cast_possible_wrap)]
             let rows = stmt.query_map(
                 params![
-                    query,
+                    fts_query,
                     workspace_id.as_bytes(),
                     project_id.as_bytes(),
                     limit as i64,
