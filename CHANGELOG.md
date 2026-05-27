@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and may reuse `LLM_API_KEY` when a custom embedding base URL is configured.
 - `ai-memory embed --force` without `--project` now re-embeds every project in
   the workspace and purges stale/superseded embedding rows in the same scope.
+- Windows hook `cwd` values sent to a Linux server now resolve projects by the
+  final path component instead of treating the full backslash path as the
+  project name.
 
 ## [0.2.0] - 2026-05-26
 ### Added

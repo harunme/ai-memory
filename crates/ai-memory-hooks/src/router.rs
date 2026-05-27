@@ -354,9 +354,6 @@ async fn resolve_project_ids(
         // server still resolve to the final component.
         let s = path.to_str()?;
         let name = s.rsplit(['/', '\\']).find(|seg| !seg.is_empty())?;
-        if name.is_empty() {
-            return None;
-        }
         Some(name.to_string())
     }
 
