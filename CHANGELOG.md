@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- Claude Code hook installs on native Windows now render Git Bash-compatible
+  `bash -c` commands that keep the POSIX `.sh` hook scripts and convert
+  drive-letter paths to Git Bash paths, matching Claude Code's actual hook
+  runner instead of emitting PowerShell commands ([#45]).
 
 ## [0.5.1] - 2026-05-27
 ### Changed
