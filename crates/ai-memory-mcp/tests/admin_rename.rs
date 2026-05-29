@@ -78,6 +78,7 @@ async fn seed_page(store: &Store, wiki: &Wiki, project: &str) -> String {
         tier: Tier::Semantic,
         pinned: false,
         title: Some(project.into()),
+        admission_ctx: None,
     })
     .await
     .unwrap();

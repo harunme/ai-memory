@@ -12,6 +12,7 @@ use ai_memory_llm::{Embedder, LlmProvider};
 use ai_memory_store::{DecayParams, PageHit, ReaderPool, WriterHandle};
 use ai_memory_wiki::{Wiki, WritePageRequest};
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
@@ -814,6 +815,7 @@ impl AiMemoryServer {
     async fn memory_write_page(
         &self,
         Parameters(args): Parameters<WritePageArgs>,
+        Extension(parts): Extension<axum::http::request::Parts>,
     ) -> Result<CallToolResult, McpError> {
         let Some(wiki) = self.wiki.as_ref() else {
             return Err(McpError::internal_error(
@@ -854,6 +856,29 @@ impl AiMemoryServer {
             serde_json::Value::Object(fm)
         };
 
+        // Populate the admission context from the request's `X-Memory-Actor-*`
+        // headers (set by the `mcp-auth` sidecar after JWT validation). rmcp 1.7
+        // exposes the original HTTP `Parts` via the `Extension<Parts>` extractor —
+        // task-locals can't be used because StreamableHttpService dispatches the
+        // tool handler in a `tokio::spawn`-ed task that doesn't inherit them.
+        // See `crate::actor::actor_from_headers` for the JWT-claim → header map.
+        let actor = crate::actor::actor_from_headers(&parts.headers);
+        // Loop prevention: a webhook that writes back into the engine sets
+        // `X-Memory-Skip-Admission-Chain` so the chain doesn't re-invoke it
+        // on the recursive write. Build the ctx when either the actor OR the
+        // skip list is present (a skip-only write still needs to carry it).
+        let skip_webhooks = crate::actor::skip_webhooks_from_headers(&parts.headers);
+        let admission_ctx = if actor.has_any() || !skip_webhooks.is_empty() {
+            Some(ai_memory_wiki::AdmissionContext {
+                actor,
+                op: ai_memory_wiki::AdmissionOp::WritePage,
+                skip_webhooks,
+                ..ai_memory_wiki::AdmissionContext::default()
+            })
+        } else {
+            None
+        };
+
         let page_id = wiki
             .write_page(WritePageRequest {
                 workspace_id: ws,
@@ -864,6 +889,7 @@ impl AiMemoryServer {
                 tier,
                 pinned: args.pinned,
                 title: args.title,
+                admission_ctx,
             })
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1851,16 +1877,29 @@ mod tests {
         let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
             .with_wiki(wiki);
 
+        // Build a synthetic `Parts` so the new `Extension<Parts>` extractor
+        // can be satisfied — no actor headers, so the admission chain
+        // gets a default (anonymous) context, same as a stdio caller.
+        let parts = axum::http::Request::builder()
+            .uri("/mcp")
+            .method("POST")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
         let result = server
-            .memory_write_page(Parameters(WritePageArgs {
-                path: "notes/santander-2025.md".into(),
-                body: "# Santander 2025\n\nDurable tax annotation.".into(),
-                title: Some("Santander 2025".into()),
-                tier: Some("semantic".into()),
-                tags: vec!["finance".into()],
-                pinned: true,
-                project: None,
-            }))
+            .memory_write_page(
+                Parameters(WritePageArgs {
+                    path: "notes/santander-2025.md".into(),
+                    body: "# Santander 2025\n\nDurable tax annotation.".into(),
+                    title: Some("Santander 2025".into()),
+                    tier: Some("semantic".into()),
+                    tags: vec!["finance".into()],
+                    pinned: true,
+                    project: None,
+                }),
+                rmcp::handler::server::tool::Extension(parts),
+            )
             .await
             .unwrap();
         let text = result

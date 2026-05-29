@@ -89,6 +89,7 @@ async fn seed_two_projects(store: &Store, wiki: &Wiki) -> (WorkspaceId, ProjectI
         tier: Tier::Semantic,
         pinned: false,
         title: Some("Keep page".into()),
+        admission_ctx: None,
     })
     .await
     .unwrap();
@@ -102,6 +103,7 @@ async fn seed_two_projects(store: &Store, wiki: &Wiki) -> (WorkspaceId, ProjectI
         tier: Tier::Semantic,
         pinned: false,
         title: Some("Doomed page".into()),
+        admission_ctx: None,
     })
     .await
     .unwrap();

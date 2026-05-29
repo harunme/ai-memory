@@ -64,6 +64,7 @@ async fn seed_page(state: &AdminState, store: &Store, path: &str, body: &str) {
             tier: Tier::Semantic,
             pinned: false,
             title: Some("Test".into()),
+            admission_ctx: None,
         })
         .await
         .unwrap();
