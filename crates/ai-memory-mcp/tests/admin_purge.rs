@@ -36,6 +36,7 @@ async fn make_state(tmp: &TempDir) -> (AdminState, Store) {
         data_dir: tmp.path().to_path_buf(),
         bind: "127.0.0.1:0".to_string(),
         bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        token_pepper: None,
         db_path,
     };
     (state, store)
@@ -348,6 +349,7 @@ async fn purge_project_idempotent_second_call_is_404() {
         db_path: store.db_path().to_path_buf(),
         bind: "127.0.0.1:0".to_string(),
         bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        token_pepper: None,
     };
 
     seed_two_projects(&store, &state_a.wiki).await;

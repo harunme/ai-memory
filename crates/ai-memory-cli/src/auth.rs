@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 
-use ai_memory_core::ActorContext;
+use ai_memory_core::{ActorContext, AuthLevel};
 use ai_memory_store::{ReaderPool, TokenPepper, WriterHandle, hash_token};
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode, header};
@@ -176,11 +176,12 @@ pub async fn require_bearer(
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Rung 0: auth disabled. Inject anonymous actor (so downstream
-    // handlers that read Extension<ActorContext> always have one),
-    // then pass through.
+    // Rung 0: auth disabled. Inject anonymous actor + anonymous
+    // tier (so downstream handlers that read Extension<ActorContext>
+    // and Extension<AuthLevel> always have one), then pass through.
     let Some(expected) = state.expected.as_deref() else {
         req.extensions_mut().insert(ActorContext::anonymous());
+        req.extensions_mut().insert(AuthLevel::Anonymous);
         return next.run(req).await;
     };
 
@@ -207,6 +208,7 @@ pub async fn require_bearer(
         // hook router / MCP server to overlay onto the actor.
         actor.agent = actor.agent.or(None);
         req.extensions_mut().insert(actor);
+        req.extensions_mut().insert(AuthLevel::Root);
 
         // First successful Basic-auth hit (no cookie yet) → also stamp
         // the cookie so the user doesn't get the dialog again next
@@ -239,6 +241,7 @@ pub async fn require_bearer(
                     ..ActorContext::default()
                 };
                 req.extensions_mut().insert(actor);
+                req.extensions_mut().insert(AuthLevel::User);
 
                 // Fire-and-forget last_seen_at bump. Errors are logged
                 // but never block the response — middleware MUST stay

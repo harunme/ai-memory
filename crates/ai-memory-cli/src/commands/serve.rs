@@ -202,6 +202,12 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 db_path: store.db_path().to_path_buf(),
                 bind: bind.clone(),
                 bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                token_pepper: config
+                    .auth
+                    .token_pepper
+                    .as_ref()
+                    .filter(|p| !p.trim().is_empty())
+                    .map(|p| ai_memory_store::TokenPepper::new(p.clone())),
             });
             // Multi-rung auth assembly:
             //   - rung 0 (no bearer_token configured) → AuthState::new

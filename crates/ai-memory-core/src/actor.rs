@@ -85,6 +85,43 @@ pub struct ActorContext {
     pub client: Option<String>,
 }
 
+/// Authorization tier the auth middleware resolved this request to.
+///
+/// Identity ([`ActorContext`]) carries *who* the request is from;
+/// `AuthLevel` carries *what they're allowed to do*. The two are
+/// distinct so a handler can guard on "must be root" without also
+/// having to inspect or compare username strings against config.
+///
+/// Available as `Extension<AuthLevel>` on every request after the
+/// auth middleware runs. Admin user-management endpoints
+/// (`POST /admin/users`, expire / revive / rotate-token) check this
+/// against [`AuthLevel::Root`] and return 403 for `User` /
+/// 401 for `Anonymous`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthLevel {
+    /// Rung 0: no auth configured. Read-mostly setups; root-only
+    /// routes refuse this tier (no root → no user management).
+    Anonymous,
+    /// Rung 1: authenticated as the configured root user.
+    /// Allowed everywhere including user-management endpoints.
+    Root,
+    /// Rung 2: authenticated via the `users` table.
+    /// Allowed on regular routes (write_page, query, etc.) but
+    /// refused on the root-only admin user-management routes.
+    User,
+}
+
+impl AuthLevel {
+    /// `true` if this tier is allowed to perform user-management
+    /// operations (currently just `Root`). Centralises the
+    /// authorization check so handlers don't drift on what counts
+    /// as "root-only".
+    #[must_use]
+    pub fn is_root(self) -> bool {
+        matches!(self, AuthLevel::Root)
+    }
+}
+
 impl ActorContext {
     /// `true` if at least one identity field is set.
     ///

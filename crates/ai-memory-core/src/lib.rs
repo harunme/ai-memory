@@ -23,7 +23,7 @@ pub const DEFAULT_WORKSPACE_NAME: &str = "default";
 pub const DEFAULT_PROJECT_NAME: &str = "scratch";
 
 pub use active_project::ActiveProject;
-pub use actor::ActorContext;
+pub use actor::{ActorContext, AuthLevel};
 pub use error::{MemoryError, MemoryResult};
 pub use handoff::{Handoff, HandoffState, NewHandoff};
 pub use ids::{
