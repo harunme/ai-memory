@@ -534,6 +534,15 @@ impl AiMemoryServer {
     /// (find-only, for reads): a write to a named project must land there, not
     /// silently fall back to the current project. With no explicit `project`,
     /// the active-project-wins behaviour is preserved (issue #2).
+    ///
+    /// When an explicit `project` is given but **no** explicit `workspace`, the
+    /// workspace defaults to the hook-published [`ActiveProject`]'s workspace
+    /// (the cwd the agent is working in) — NOT the server's baked `--workspace`.
+    /// Otherwise a write like `{project: "foo"}` from a cwd routed to workspace
+    /// `bar` would silently land in (and recreate) `default/foo` instead of
+    /// `bar/foo`. To target the baked/shared workspace explicitly, pass
+    /// `workspace`. Falls back to the baked default only when no `ActiveProject`
+    /// has been published yet (early startup / no hooks).
     async fn write_target_ids(
         &self,
         explicit_workspace: Option<&str>,
@@ -553,7 +562,13 @@ impl AiMemoryServer {
                 .get_or_create_workspace(name.to_string())
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-            None => self.workspace_id,
+            // No explicit workspace → the cwd's (active) workspace, not the
+            // baked global default — keeps writes consistent with reads.
+            None => self
+                .active_project
+                .get()
+                .map(|(ws, _)| ws)
+                .unwrap_or(self.workspace_id),
         };
         let project_id = self
             .writer
@@ -1636,6 +1651,78 @@ mod tests {
             server.effective_ids(Some("does-not-exist")).await,
             (ws, other),
             "unknown explicit project falls through to the active pointer"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_target_ids_defaults_workspace_to_active_project() {
+        let (_tmp, store, server, baked_ws, baked_proj) = setup_server().await;
+
+        // A second workspace — the cwd's actual workspace (e.g. "djalmajr"),
+        // distinct from the server's baked "default".
+        let other_ws = store
+            .writer
+            .get_or_create_workspace("djalmajr")
+            .await
+            .unwrap();
+        let other_proj = store
+            .writer
+            .get_or_create_project(other_ws, "ai-memory", None)
+            .await
+            .unwrap();
+        // Hook publishes the cwd's project (in the OTHER workspace).
+        server.active_project.set(other_ws, other_proj);
+
+        // Explicit project, NO workspace → must land in the active project's
+        // workspace (djalmajr) and REUSE the existing project, not recreate it
+        // under the baked default.
+        let (ws, proj) = server
+            .write_target_ids(None, Some("ai-memory"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ws, other_ws,
+            "workspace must default to the active project's, not the baked default"
+        );
+        assert_eq!(
+            proj, other_proj,
+            "must reuse djalmajr/ai-memory, not recreate it"
+        );
+
+        // A different project name (no workspace) also lands in the cwd's workspace.
+        let (ws2, _p2) = server
+            .write_target_ids(None, Some("sibling"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ws2, other_ws,
+            "a sibling project lands in the cwd's workspace"
+        );
+
+        // Explicit workspace still overrides the active default.
+        let (ws3, _p3) = server
+            .write_target_ids(Some("default"), Some("ai-memory"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ws3, baked_ws,
+            "explicit workspace wins over the active pointer"
+        );
+
+        // No active project published → fall back to the baked workspace.
+        let fresh = AiMemoryServer::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            baked_ws,
+            baked_proj,
+        );
+        let (ws4, _p4) = fresh
+            .write_target_ids(None, Some("ai-memory"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ws4, baked_ws,
+            "no active project → baked workspace is the fallback"
         );
     }
 
