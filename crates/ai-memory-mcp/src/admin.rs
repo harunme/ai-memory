@@ -2120,6 +2120,26 @@ async fn handle_move_project(
                 }
                 OnConflict::Block => path.clone(),
             },
+            // No content conflict — but the natural path may already have been
+            // CLAIMED by an earlier page's de-duplication (duplicate mode). If
+            // so, de-duplicate this one too rather than clobbering the page that
+            // already took the slot.
+            _ if used_dest_paths.contains(s.path.as_str()) => {
+                let deduped = dedup_dest_path(
+                    &state,
+                    dst_ws,
+                    dst_proj,
+                    &s.path,
+                    &req.from_workspace,
+                    &used_dest_paths,
+                )
+                .await;
+                conflicts.push(PathConflict {
+                    path: s.path.clone(),
+                    moved_to: deduped.as_str().to_string(),
+                });
+                deduped
+            }
             _ => path.clone(),
         };
         used_dest_paths.insert(dest_path.as_str().to_string());

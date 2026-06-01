@@ -888,6 +888,91 @@ async fn copy_purge_conflict_overwrites() {
     assert_eq!(page.body, "body SRC", "source superseded the destination");
 }
 
+/// on_conflict=duplicate edge case: a source page whose path collides with the
+/// destination AND another source page whose natural path equals the first's
+/// de-duplicated target. All three distinct contents must survive — the natural
+/// path must not clobber the slot the de-duplication already claimed.
+#[tokio::test]
+async fn copy_purge_duplicate_avoids_clobbering_dedup_slot() {
+    let tmp = TempDir::new().unwrap();
+    let (state, store) = make_state(&tmp).await;
+    // `notes/dup.md` conflicts with the destination; its dedup target is
+    // `notes/dup-from-src.md` — which ALSO exists as a source page.
+    seed_page(
+        &store,
+        &state.wiki,
+        "src",
+        "proj",
+        "notes/dup.md",
+        "SRC-dup",
+    )
+    .await;
+    seed_page(
+        &store,
+        &state.wiki,
+        "src",
+        "proj",
+        "notes/dup-from-src.md",
+        "SRC-natural",
+    )
+    .await;
+    seed_page(
+        &store,
+        &state.wiki,
+        "dst",
+        "proj",
+        "notes/dup.md",
+        "DST-dup",
+    )
+    .await;
+
+    let resp = post(
+        state,
+        "/admin/move-project",
+        json!({ "from_workspace": "src", "project": "proj", "to_workspace": "dst",
+                "confirm": true, "on_conflict": "duplicate" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // All three distinct contents survive at three distinct paths (nothing
+    // clobbered). Assert as a set so the test is order-independent.
+    let (dw, dp) = ids(&store, "dst", "proj").await;
+    let paths: Vec<String> = store
+        .reader
+        .list_pages("dst", "proj")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.path)
+        .collect();
+    assert_eq!(
+        paths.len(),
+        3,
+        "three distinct destination paths: {paths:?}"
+    );
+    let mut bodies: Vec<String> = Vec::new();
+    for p in &paths {
+        bodies.push(
+            store
+                .reader
+                .page_body_by_ids(dw, dp, p)
+                .await
+                .unwrap()
+                .unwrap()
+                .body
+                .trim()
+                .to_string(),
+        );
+    }
+    bodies.sort();
+    assert_eq!(
+        bodies,
+        vec!["DST-dup", "SRC-dup", "SRC-natural"],
+        "every version survives; none clobbered"
+    );
+}
+
 /// W6: the copy-purge (merge) path carries the source embedding verbatim onto
 /// the new destination page id — not a recompute. (The existing embedding test
 /// exercised only the true-move path.)
