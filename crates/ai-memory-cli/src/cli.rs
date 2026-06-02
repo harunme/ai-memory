@@ -96,6 +96,13 @@ pub enum Command {
     /// Useful after renaming the project's directory on disk so the hook
     /// router keeps writing into the same logical project.
     RenameProject(RenameProjectArgs),
+    /// Move a project into another workspace. A fresh destination is a
+    /// lossless TRUE MOVE (re-stamp workspace_id, keep project_id, rename the
+    /// dir) — sessions/observations/handoffs and history all survive. A
+    /// destination that already holds a same-named project MERGES via
+    /// copy+purge (only durable pages migrate, source purged). Either way the
+    /// operation is irreversible — requires `--confirm`.
+    MoveProject(MoveProjectArgs),
     /// Remove ai-memory's wiring (hooks, MCP, instructions) from all
     /// detected agents. Dry-run unless `--apply`.
     Uninstall(UninstallArgs),
@@ -339,6 +346,38 @@ pub struct RenameProjectArgs {
     /// New project name. Must be non-empty and contain no slashes.
     #[arg(long)]
     pub to: String,
+}
+
+/// Arguments for `move-project`.
+#[derive(Debug, Args)]
+pub struct MoveProjectArgs {
+    /// Source workspace. Defaults to `default`.
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
+    pub from_workspace: String,
+    /// Project name to move. When omitted, auto-derived from the basename
+    /// of the current git repo root (or CWD if no git repo).
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Destination workspace. Auto-created if it doesn't exist.
+    #[arg(long)]
+    pub to_workspace: String,
+    /// REQUIRED — the move re-stamps (true-move) or copies+purges (merge) the
+    /// source, both irreversible. Without this flag the CLI errors out.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Override the live-session guard. By default the server refuses (409) to
+    /// move the project a hook session is actively writing to; `--force`
+    /// proceeds anyway (still safe — the move keeps the active pointer correct
+    /// and the schema rejects any stale write).
+    #[arg(long)]
+    pub force: bool,
+    /// Merge conflict policy (copy-purge path only): what to do when a source
+    /// page's path already exists in the destination with different content.
+    /// `block` (default) aborts and lists the conflicts; `overwrite` lets the
+    /// source supersede the destination page; `duplicate` keeps both (source
+    /// lands under a de-duplicated path).
+    #[arg(long, value_parser = ["block", "overwrite", "duplicate"], default_value = "block")]
+    pub on_conflict: String,
 }
 
 /// Arguments for `install-instructions`.
@@ -863,6 +902,23 @@ pub struct ServeArgs {
     /// --enable-web is set.
     #[arg(long)]
     pub web_ui_dir: Option<PathBuf>,
+    /// Base path the whole HTTP surface is served under. Empty (default)
+    /// keeps every route at the host root — byte-identical to previous
+    /// behaviour. Set e.g. `/wiki` to host ai-memory under a URL subpath
+    /// behind a reverse proxy that preserves the prefix; then `/mcp`,
+    /// `/api/v1`, `/hook` and the web UI all live under it (`/wiki/mcp`,
+    /// `/wiki/api/v1`, …). The value is normalised to `/<core>` (leading
+    /// slash, no trailing); `/` and `` both mean root.
+    #[arg(long, env = "AI_MEMORY_BASE_PATH", default_value = "")]
+    pub base_path: String,
+    /// Slug the web UI is mounted at, WITHIN `--base-path`. Default `/web`
+    /// (the read-only `/api/v1` API always stays at `<base>/api/v1`). Set
+    /// `/` to serve the UI at the base root itself (e.g. `/wiki` instead of
+    /// `/wiki/web`). The server injects a normalised `<base href>` into the
+    /// served HTML so the built-in UI and a custom `--web-ui-dir` SPA both
+    /// resolve their assets under the prefix without a rebuild.
+    #[arg(long, env = "AI_MEMORY_WEB_SLUG", default_value = "/web")]
+    pub web_slug: String,
     /// Run the HTTP transport in stateful (session) mode: the server
     /// issues an `Mcp-Session-Id` on `initialize` and requires it on
     /// every later request, with SSE-framed responses. Off by default —

@@ -79,7 +79,7 @@ priors are at the [bottom](#influences-and-prior-art).
   Server runs local (loopback) OR on a homelab box (LAN/VPN/cloud)
   with bearer-token auth.
 - **Thin-client CLI.** `ai-memory status`, `bootstrap`, `purge-project`,
-  `rename-project`, `lint`, `embed`, `forget-sweep`, `backup` are
+  `rename-project`, `move-project`, `lint`, `embed`, `forget-sweep`, `backup` are
   all HTTP clients of the running server - never touch SQLite or
   wiki files directly. `status` also reports passive LLM/embedding
   provider health from the last real provider call. Server is the
@@ -368,6 +368,13 @@ Useful entry points:
   A reference implementation — a SolidJS knowledge browser with
   screenshots and e2e tests — lives at
   [djalmajr/ai-memory-ui](https://github.com/djalmajr/ai-memory-ui).
+
+  When a reverse proxy hosts ai-memory under a URL subpath, set
+  `--base-path` (or `AI_MEMORY_BASE_PATH`) so every HTTP surface moves
+  together. Example: `--base-path /wiki` serves MCP at `/wiki/mcp`, hooks at
+  `/wiki/hook`, the API at `/wiki/api/v1`, and the default browser at
+  `/wiki/web`. Set `--web-slug /` if you want the browser or custom SPA at
+  `/wiki` itself.
 
 Install the routing snippet once so agents proactively call the right
 MCP tool for those prompts:
