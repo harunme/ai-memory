@@ -545,6 +545,42 @@ mod tests {
         assert!(matches!(op, AdmissionOp::WritePage));
     }
 
+    /// `partial_failure` serialises only when `true`, so existing webhook
+    /// consumers see no extra key on the happy path. Mirrors that care
+    /// about filesystem-vs-DB drift (a git-push mirror) opt in by reading
+    /// the field when it appears.
+    #[test]
+    fn partial_failure_is_omitted_when_false() {
+        let ctx = AdmissionContext {
+            workspace: "w".into(),
+            project: "p".into(),
+            op: AdmissionOp::PurgeProject,
+            ..Default::default()
+        };
+        let payload = serde_json::to_value(&ctx).unwrap();
+        assert!(
+            payload.get("partial_failure").is_none(),
+            "partial_failure must be skipped when false: {payload}"
+        );
+    }
+
+    #[test]
+    fn partial_failure_serialises_when_true() {
+        let ctx = AdmissionContext {
+            workspace: "w".into(),
+            project: "p".into(),
+            op: AdmissionOp::PurgeProject,
+            partial_failure: true,
+            ..Default::default()
+        };
+        let payload = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(
+            payload.get("partial_failure").and_then(|v| v.as_bool()),
+            Some(true),
+            "partial_failure must appear on the wire when true: {payload}"
+        );
+    }
+
     #[test]
     fn webhook_config_deserialises_with_defaults() {
         // Using JSON keeps the test free of an extra TOML dep — the

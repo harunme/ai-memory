@@ -1328,6 +1328,180 @@ async fn copy_purge_partial_skips_and_preserves_source() {
     );
 }
 
+/// Reject-policy webhook returning 5xx must abort a true-move (cross-workspace
+/// rename) before any DB or filesystem change. The original test only used a
+/// 204-returning webhook, which never exercises the reject path.
+#[tokio::test]
+async fn true_move_aborts_when_admission_rejects() {
+    let app = Router::new().route(
+        "/hook",
+        axum_post(
+            |_headers: HeaderMap, Json(_payload): Json<serde_json::Value>| async move {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "mirror refuses the move".to_string(),
+                )
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tmp = TempDir::new().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let chain = AdmissionChain::new(vec![WebhookConfig {
+        name: "rejecting-mirror".into(),
+        url,
+        timeout_ms: 2_000,
+        failure_policy: FailurePolicy::Reject,
+        events: vec![AdmissionOp::MoveProject],
+        blocking: true,
+    }])
+    .unwrap();
+    let wiki = Wiki::new(tmp.path(), store.writer.clone())
+        .unwrap()
+        .with_admission_chain(chain)
+        .with_store_reader(store.reader.clone());
+    let state = AdminState {
+        writer: store.writer.clone(),
+        reader: store.reader.clone(),
+        wiki,
+        llm: None,
+        embedder: None,
+        provider_health: ai_memory_llm::ProviderHealth::default(),
+        decay_params: DecayParams::default(),
+        data_dir: tmp.path().to_path_buf(),
+        db_path: store.db_path().to_path_buf(),
+        bind: "127.0.0.1:0".to_string(),
+        bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        token_pepper: None,
+        active_project: ai_memory_core::ActiveProject::new(),
+        on_project_moved: None,
+    };
+    seed_page(&store, &state.wiki, "src", "proj", "notes/a.md", "body a").await;
+
+    let resp = post(
+        state,
+        "/admin/move-project",
+        json!({ "from_workspace": "src", "project": "proj", "to_workspace": "dst", "confirm": true }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "reject-policy webhook returning 5xx must abort the move"
+    );
+
+    // Source rows must be intact — admission ran before any destructive work.
+    let src_pages = store.reader.list_pages("src", "proj").await.unwrap();
+    assert_eq!(
+        src_pages.len(),
+        1,
+        "source pages must survive when admission rejects the move"
+    );
+}
+
+/// Audit BLOCKING #2 regression guard: copy-purge merge must run the purge
+/// admission BEFORE writer.purge_project so a reject-policy webhook can still
+/// abort the source-side destruction. The prior code ordered admit AFTER the
+/// SQL purge — by the time admit ran the rows were gone and reject came too
+/// late. Reject-on-purge here must leave source rows intact.
+#[tokio::test]
+async fn copy_purge_purge_admission_runs_before_db_destruction() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let purge_hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let purge_hits_for_route = purge_hits.clone();
+    let app = Router::new().route(
+        "/hook",
+        axum_post(
+            move |headers: HeaderMap, Json(_payload): Json<serde_json::Value>| {
+                let purge_hits = purge_hits_for_route.clone();
+                async move {
+                    let op = headers
+                        .get("X-Memory-Op")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    // Accept move_project so the copy leg can land; reject the
+                    // PurgeProject step so the source SQL purge must not run.
+                    match op {
+                        "purge_project" => {
+                            purge_hits.fetch_add(1, Ordering::SeqCst);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "no purging".to_string())
+                        }
+                        _ => (StatusCode::NO_CONTENT, String::new()),
+                    }
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tmp = TempDir::new().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let chain = AdmissionChain::new(vec![WebhookConfig {
+        name: "mirror".into(),
+        url,
+        timeout_ms: 2_000,
+        failure_policy: FailurePolicy::Reject,
+        events: vec![AdmissionOp::MoveProject, AdmissionOp::PurgeProject],
+        blocking: true,
+    }])
+    .unwrap();
+    let wiki = Wiki::new(tmp.path(), store.writer.clone())
+        .unwrap()
+        .with_admission_chain(chain)
+        .with_store_reader(store.reader.clone());
+    let state = AdminState {
+        writer: store.writer.clone(),
+        reader: store.reader.clone(),
+        wiki,
+        llm: None,
+        embedder: None,
+        provider_health: ai_memory_llm::ProviderHealth::default(),
+        decay_params: DecayParams::default(),
+        data_dir: tmp.path().to_path_buf(),
+        db_path: store.db_path().to_path_buf(),
+        bind: "127.0.0.1:0".to_string(),
+        bootstrap_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        token_pepper: None,
+        active_project: ai_memory_core::ActiveProject::new(),
+        on_project_moved: None,
+    };
+    // Pre-seed BOTH sides so move-project takes the copy-purge path (merge
+    // into existing dst/proj), not the lossless true-move path.
+    seed_page(&store, &state.wiki, "src", "proj", "notes/a.md", "body a").await;
+    seed_page(&store, &state.wiki, "dst", "proj", "notes/keep.md", "keep").await;
+
+    let resp = post(
+        state,
+        "/admin/move-project",
+        json!({ "from_workspace": "src", "project": "proj", "to_workspace": "dst", "confirm": true }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "purge admission rejecting must surface as 500 from the move handler"
+    );
+    assert!(
+        purge_hits.load(Ordering::SeqCst) >= 1,
+        "purge admission webhook must have fired (admit runs before the DB purge)"
+    );
+
+    // The source rows must still be present: admission ran before the SQL
+    // destruction, so the reject prevented `writer.purge_project` from running.
+    let src_pages = store.reader.list_pages("src", "proj").await.unwrap();
+    assert_eq!(
+        src_pages.len(),
+        1,
+        "src/proj pages must survive when purge admission rejects: {src_pages:?}"
+    );
+}
+
 /// W6: re-running a copy-purge merge is idempotent — re-copying an
 /// already-present page is a no-op supersession, leaving no duplicates.
 #[tokio::test]

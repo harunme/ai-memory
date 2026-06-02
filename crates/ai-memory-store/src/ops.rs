@@ -2151,5 +2151,32 @@ mod tests {
             ..mismatched_obs
         };
         insert_observation(&mut conn, &good_obs).unwrap();
+
+        // The handoff insert is the fourth INSERT trigger; audit flagged
+        // that the original V18 test omitted it, so the only coverage
+        // for the handoffs trigger was the temp-table CHECK on migration.
+        // Assert the BEFORE INSERT trigger fires on a stale pair, and
+        // a corrected pair lands cleanly.
+        let mismatched_handoff = NewHandoff {
+            workspace_id: other_ws,
+            project_id: proj,
+            from_session_id: None,
+            from_agent: AgentKind::ClaudeCode,
+            to_agent: None,
+            cwd: None,
+            summary: "stale".into(),
+            open_questions: vec![],
+            next_steps: vec![],
+            files_touched: vec![],
+        };
+        assert!(
+            insert_handoff(&mut conn, &mismatched_handoff).is_err(),
+            "handoff insert with mismatched workspace must abort"
+        );
+        let good_handoff = NewHandoff {
+            workspace_id: ws,
+            ..mismatched_handoff
+        };
+        insert_handoff(&mut conn, &good_handoff).unwrap();
     }
 }

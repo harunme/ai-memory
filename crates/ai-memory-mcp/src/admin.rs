@@ -1775,10 +1775,7 @@ async fn true_move_project(
                 Json(serde_json::json!({ "error": msg })),
             );
         }
-        Err(WikiError::Io(e))
-            if e.kind() == std::io::ErrorKind::AlreadyExists
-                && e.to_string().contains("destination dir already exists") =>
-        {
+        Err(e @ WikiError::DestinationExists(_)) => {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -1828,10 +1825,27 @@ async fn true_move_project(
     )
 }
 
+/// Token inserted between the original stem and the source-workspace
+/// slug when copy-purge merges conflicting page paths
+/// (`<stem>-from-<src_workspace>.md`). The literal also appears in
+/// `docs/lifecycle-ops.md`; keep these two in sync.
+const DEDUP_FROM_TOKEN: &str = "-from-";
+
+/// Char allowlist for the source-workspace slug embedded in a deduped
+/// destination path. ASCII alphanumeric plus `-` / `_` keeps the slug
+/// safe inside a filesystem path component on every supported platform
+/// (Windows treats `:`, `*`, `?`, `<`, `>`, `|` as illegal; Linux
+/// tolerates more but UTF-8 mojibake in filenames is a maintenance
+/// hazard). Everything else collapses to a single `-` separator,
+/// preserving readability without introducing path-traversal vectors.
+fn is_dedup_slug_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
 /// Pick a destination path that collides with neither an existing destination
 /// page nor one already claimed in this run. Keeps the source page's stem and
-/// appends `-from-<src_workspace>` (then `-2`, `-3`, …). Used by the copy-purge
-/// merge to keep BOTH pages when a path conflicts.
+/// appends `<DEDUP_FROM_TOKEN><src_workspace>` (then `-2`, `-3`, …). Used by
+/// the copy-purge merge to keep BOTH pages when a path conflicts.
 async fn dedup_dest_path(
     state: &AdminState,
     dst_ws: WorkspaceId,
@@ -1846,15 +1860,9 @@ async fn dedup_dest_path(
     };
     let slug: String = src_workspace
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if is_dedup_slug_char(c) { c } else { '-' })
         .collect();
-    let base = format!("{stem}-from-{slug}");
+    let base = format!("{stem}{DEDUP_FROM_TOKEN}{slug}");
     let mut n = 0u32;
     loop {
         let cand = if n == 0 {

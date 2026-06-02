@@ -216,13 +216,9 @@ impl Wiki {
         let dst = self.project_root(to_workspace, project_id);
 
         if dst.exists() {
-            return Err(crate::WikiError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "destination dir already exists: {}; refusing true-move",
-                    dst.display()
-                ),
-            )));
+            return Err(crate::WikiError::DestinationExists(
+                dst.display().to_string(),
+            ));
         }
 
         let renamed = if src.exists() {

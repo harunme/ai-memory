@@ -34,6 +34,14 @@ pub enum WikiError {
     /// Store-level error.
     #[error(transparent)]
     Store(#[from] StoreError),
+
+    /// A move-project / similar operation refused to overwrite an existing
+    /// destination directory. Surfaced as `409 Conflict` at the admin layer
+    /// without string-matching the `io::Error` message. The wrapped path is
+    /// the namespaced project root (`<wiki_root>/<ws>/<proj>/`) that
+    /// already exists.
+    #[error("destination dir already exists: {0}")]
+    DestinationExists(String),
 }
 
 impl From<serde_yaml::Error> for WikiError {
