@@ -127,9 +127,10 @@ impl Harness {
 
         let active_project = ActiveProject::with_config(mode, ttl, max_entries);
 
-        let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, baked_proj)
-            .with_wiki(wiki.clone())
-            .with_active_project(active_project.clone());
+        let server =
+            AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, baked_proj)
+                .with_wiki(wiki.clone())
+                .with_active_project(active_project.clone());
 
         let mcp_service = StreamableHttpService::new(
             move || Ok(server.clone()),
@@ -218,17 +219,19 @@ fn hook_request(user: Option<&str>, session_id: &str, project_index: usize) -> R
     });
     let mut builder = Request::builder()
         .method("POST")
-        .uri("/hook?event=session-start&agent=claude-code&project=proj-{i}".replace(
-            "{i}",
-            &project_index.to_string(),
-        ))
+        .uri(
+            "/hook?event=session-start&agent=claude-code&project=proj-{i}"
+                .replace("{i}", &project_index.to_string()),
+        )
         .header("host", "localhost")
         .header("content-type", "application/json")
         .header("x-test-actor-session-id", session_id);
     if let Some(u) = user {
         builder = builder.header("x-test-actor-user", u);
     }
-    builder.body(Body::from(body.to_string())).expect("hook req")
+    builder
+        .body(Body::from(body.to_string()))
+        .expect("hook req")
 }
 
 /// Build a `POST /mcp` tools/call request for `memory_query` matching the
@@ -272,11 +275,7 @@ fn mcp_write_request(
     build_mcp_request(body.to_string(), user, session_id)
 }
 
-fn build_mcp_request(
-    body: String,
-    user: Option<&str>,
-    session_id: Option<&str>,
-) -> Request<Body> {
+fn build_mcp_request(body: String, user: Option<&str>, session_id: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -672,7 +671,13 @@ async fn ttl_eviction_under_concurrent_insertion() {
     // each must see its own project.
     const N: usize = 12;
     for i in 0..N {
-        fire_hook_and_settle(&h.router, None, &format!("ttl-{i}"), (i % SEEDED_PROJECTS) + 1).await;
+        fire_hook_and_settle(
+            &h.router,
+            None,
+            &format!("ttl-{i}"),
+            (i % SEEDED_PROJECTS) + 1,
+        )
+        .await;
     }
 
     // Phase 2: wait past the TTL.
@@ -925,13 +930,15 @@ async fn sustained_per_session_isolation_holds_under_continuous_traffic() {
 // would break exactly one of these.
 // ────────────────────────────────────────────────────────────────────────────
 
-fn hook_with_raw_body(body: serde_json::Value, project_index: usize, session_id: &str) -> Request<Body> {
+fn hook_with_raw_body(
+    body: serde_json::Value,
+    project_index: usize,
+    session_id: &str,
+) -> Request<Body> {
     // Same `project` query arg as the rest of the suite so the hook
     // resolves directly to the seeded `proj-{i}` row regardless of how
     // the agent shape encodes cwd.
-    let uri = format!(
-        "/hook?event=session-start&agent=claude-code&project=proj-{project_index}"
-    );
+    let uri = format!("/hook?event=session-start&agent=claude-code&project=proj-{project_index}");
     Request::builder()
         .method("POST")
         .uri(uri)
@@ -945,7 +952,12 @@ fn hook_with_raw_body(body: serde_json::Value, project_index: usize, session_id:
         .expect("agent-shape hook req")
 }
 
-async fn fire_raw_hook_and_settle(router: &Router, body: serde_json::Value, project_index: usize, session_id: &str) {
+async fn fire_raw_hook_and_settle(
+    router: &Router,
+    body: serde_json::Value,
+    project_index: usize,
+    session_id: &str,
+) {
     let resp = router
         .clone()
         .oneshot(hook_with_raw_body(body, project_index, session_id))

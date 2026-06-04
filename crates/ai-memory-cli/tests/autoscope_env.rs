@@ -96,8 +96,8 @@ fn spawn_and_wait_for_log(
     (matched, all_stderr)
 }
 
-/// Spawn the binary and let it run to completion, capturing exit status
-/// + stderr. Used for the invalid-mode test where startup fails before
+/// Spawn the binary and let it run to completion, capturing both exit status
+/// and stderr. Used for the invalid-mode test where startup fails before
 /// reaching the log line we'd otherwise wait for.
 fn spawn_and_wait_for_exit(envs: &[(&str, &str)], timeout: Duration) -> (bool, String) {
     let tmp = TempDir::new().expect("tempdir for serve");
@@ -168,9 +168,8 @@ fn per_session_mode_via_env() {
         STARTUP_NEEDLE,
         STARTUP_TIMEOUT,
     );
-    let line = line.unwrap_or_else(|| {
-        panic!("startup log line not found for per_session.\nstderr:\n{all}")
-    });
+    let line = line
+        .unwrap_or_else(|| panic!("startup log line not found for per_session.\nstderr:\n{all}"));
     assert!(
         line.contains("PerSession"),
         "expected `PerSession` in startup line, got: {line}\nfull stderr:\n{all}"
@@ -184,9 +183,8 @@ fn per_actor_mode_via_env() {
         STARTUP_NEEDLE,
         STARTUP_TIMEOUT,
     );
-    let line = line.unwrap_or_else(|| {
-        panic!("startup log line not found for per_actor.\nstderr:\n{all}")
-    });
+    let line =
+        line.unwrap_or_else(|| panic!("startup log line not found for per_actor.\nstderr:\n{all}"));
     assert!(
         line.contains("PerActor"),
         "expected `PerActor` in startup line, got: {line}\nfull stderr:\n{all}"
@@ -281,9 +279,8 @@ fn session_ttl_zero_clamps_and_starts() {
         STARTUP_NEEDLE,
         STARTUP_TIMEOUT,
     );
-    let line = line.unwrap_or_else(|| {
-        panic!("startup log line not found with ttl=0.\nstderr:\n{all}")
-    });
+    let line =
+        line.unwrap_or_else(|| panic!("startup log line not found with ttl=0.\nstderr:\n{all}"));
     assert!(
         line.contains("PerActor"),
         "session_ttl_secs=0 should still start in per_actor mode: {line}\nfull stderr:\n{all}"

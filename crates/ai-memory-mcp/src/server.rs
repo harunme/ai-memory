@@ -3194,12 +3194,15 @@ mod tests {
 
         // Alpha twin must survive.
         let read_alpha = server
-            .memory_read_page(Parameters(ReadPageArgs {
-                query: None,
-                path: Some("notes/twin.md".into()),
-                project: Some("shared".into()),
-                workspace: Some("alpha".into()),
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_read_page(
+                Parameters(ReadPageArgs {
+                    query: None,
+                    path: Some("notes/twin.md".into()),
+                    project: Some("shared".into()),
+                    workspace: Some("alpha".into()),
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await;
         assert!(
             read_alpha.is_ok(),
@@ -3208,12 +3211,15 @@ mod tests {
 
         // Beta twin must be gone (file-on-disk delete + DB row cleared).
         let read_beta = server
-            .memory_read_page(Parameters(ReadPageArgs {
-                query: None,
-                path: Some("notes/twin.md".into()),
-                project: Some("shared".into()),
-                workspace: Some("beta".into()),
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_read_page(
+                Parameters(ReadPageArgs {
+                    query: None,
+                    path: Some("notes/twin.md".into()),
+                    project: Some("shared".into()),
+                    workspace: Some("beta".into()),
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await;
         assert!(
             read_beta.is_err(),
@@ -3436,14 +3442,17 @@ mod tests {
     async fn handoff_cancel_expires_open_handoff_and_clears_briefing_count() {
         let (_tmp, store, server, _ws, _pj) = setup_server().await;
         let begin = server
-            .memory_handoff_begin(Parameters(HandoffBeginArgs {
-                summary: "accidental status summary".into(),
-                open_questions: vec![],
-                next_steps: vec![],
-                files_touched: vec![],
-                cwd: Some("/tmp/aim".into()),
-                project: None,
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_handoff_begin(
+                Parameters(HandoffBeginArgs {
+                    summary: "accidental status summary".into(),
+                    open_questions: vec![],
+                    next_steps: vec![],
+                    files_touched: vec![],
+                    cwd: Some("/tmp/aim".into()),
+                    project: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await
             .unwrap();
         let begin_text = begin
@@ -3456,11 +3465,14 @@ mod tests {
         let handoff_id = begin_json["handoff_id"].as_str().unwrap().to_string();
 
         let before = server
-            .memory_briefing(Parameters(BriefingArgs {
-                recent_pages_limit: Some(5),
-                project: None,
-                workspace: None,
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_briefing(
+                Parameters(BriefingArgs {
+                    recent_pages_limit: Some(5),
+                    project: None,
+                    workspace: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await
             .unwrap();
         let before_text = before
@@ -3472,11 +3484,14 @@ mod tests {
         assert!(before_text.contains("\"pending_handoff_count\": 1"));
 
         let cancel = server
-            .memory_handoff_cancel(Parameters(HandoffCancelArgs {
-                handoff_id: handoff_id.clone(),
-                project: None,
-                workspace: None,
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_handoff_cancel(
+                Parameters(HandoffCancelArgs {
+                    handoff_id: handoff_id.clone(),
+                    project: None,
+                    workspace: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await
             .unwrap();
         let cancel_text = cancel
@@ -3489,11 +3504,14 @@ mod tests {
         assert!(cancel_text.contains("\"state\": \"expired\""));
 
         let after = server
-            .memory_briefing(Parameters(BriefingArgs {
-                recent_pages_limit: Some(5),
-                project: None,
-                workspace: None,
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_briefing(
+                Parameters(BriefingArgs {
+                    recent_pages_limit: Some(5),
+                    project: None,
+                    workspace: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await
             .unwrap();
         let after_text = after
@@ -3505,10 +3523,13 @@ mod tests {
         assert!(after_text.contains("\"pending_handoff_count\": 0"));
 
         let accept = server
-            .memory_handoff_accept(Parameters(HandoffAcceptArgs {
-                cwd: Some("/tmp/aim".into()),
-                project: None,
-            }), rmcp::handler::server::tool::Extension(test_parts_default()))
+            .memory_handoff_accept(
+                Parameters(HandoffAcceptArgs {
+                    cwd: Some("/tmp/aim".into()),
+                    project: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
             .await
             .unwrap();
         let accept_text = accept

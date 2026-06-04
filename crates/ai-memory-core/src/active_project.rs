@@ -582,7 +582,11 @@ mod tests {
     impl Rng {
         fn new(seed: u64) -> Self {
             // Avoid the all-zero degenerate state.
-            Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+            Self(if seed == 0 {
+                0x9e37_79b9_7f4a_7c15
+            } else {
+                seed
+            })
         }
         fn next(&mut self) -> u64 {
             let mut x = self.0;
@@ -600,11 +604,11 @@ mod tests {
     /// One operation in the randomised harness.
     #[derive(Debug, Clone, Copy)]
     enum Op {
-        Set(usize),    // set_for(actor_pool[idx], ws, fresh proj)
-        Get(usize),    // get_for(actor_pool[idx])
-        ClearAll,      // clear() — single + keyed
-        SetSingle,     // set(ws, fresh proj) — legacy single-slot path
-        GetSingle,     // get() — legacy single-slot path
+        Set(usize), // set_for(actor_pool[idx], ws, fresh proj)
+        Get(usize), // get_for(actor_pool[idx])
+        ClearAll,   // clear() — single + keyed
+        SetSingle,  // set(ws, fresh proj) — legacy single-slot path
+        GetSingle,  // get() — legacy single-slot path
     }
 
     fn run_seeded<F: FnMut(usize, &Op, &ActiveProject)>(
@@ -623,7 +627,13 @@ mod tests {
             })
             .collect();
 
-        let op_table = [Op::Set(0), Op::Get(0), Op::ClearAll, Op::SetSingle, Op::GetSingle];
+        let op_table = [
+            Op::Set(0),
+            Op::Get(0),
+            Op::ClearAll,
+            Op::SetSingle,
+            Op::GetSingle,
+        ];
 
         for step in 0..steps {
             let mut op = rng.pick(&op_table);
@@ -664,11 +674,8 @@ mod tests {
         let ws = WorkspaceId::new();
         for seed in [1, 42, 1337, 0xdead_beef, 0xfeed_face] {
             let cap = 8;
-            let ap = ActiveProject::with_config(
-                ActiveProjectMode::PerActor,
-                DEFAULT_PER_KEY_TTL,
-                cap,
-            );
+            let ap =
+                ActiveProject::with_config(ActiveProjectMode::PerActor, DEFAULT_PER_KEY_TTL, cap);
             // Pool larger than cap so eviction is exercised continuously.
             run_seeded(&ap, seed, 2_000, cap * 4, ws, |step, op, ap| {
                 let count = ap.keyed_entry_count_for_test();
@@ -732,16 +739,16 @@ mod tests {
     fn prop_clear_wipes_all_slots() {
         let ws = WorkspaceId::new();
         for seed in [1_u64, 7, 314_159, 271_828, 161_803] {
-            let ap = ActiveProject::with_config(
-                ActiveProjectMode::PerActor,
-                DEFAULT_PER_KEY_TTL,
-                64,
-            );
+            let ap =
+                ActiveProject::with_config(ActiveProjectMode::PerActor, DEFAULT_PER_KEY_TTL, 64);
             run_seeded(&ap, seed, 500, 8, ws, |_step, _op, _ap| {});
             // After arbitrary ops, clear and assert emptiness from every
             // angle. Use a fresh actor key not seen in the run.
             ap.clear();
-            assert!(ap.get().is_none(), "seed={seed:#x}: single slot not cleared");
+            assert!(
+                ap.get().is_none(),
+                "seed={seed:#x}: single slot not cleared"
+            );
             assert!(
                 ap.keyed_only_get(&ActorKey {
                     user: Some("post-clear-probe".into()),
