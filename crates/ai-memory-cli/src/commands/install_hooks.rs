@@ -2123,9 +2123,7 @@ model = "gpt-5"
             !plugin.contains(r#""session.created": async"#),
             "OpenCode bus events must be handled through the `event` hook"
         );
-        assert!(plugin.contains(
-            "import { basename, dirname, join, resolve } from \"node:path\";"
-        ));
+        assert!(plugin.contains("import { basename, dirname, join, resolve } from \"node:path\";"));
         assert!(plugin.contains("basename(dirname(marker))"));
     }
 
@@ -2175,9 +2173,9 @@ model = "gpt-5"
         assert!(extension.contains("applyMarkerParams(url, cwd);"));
         assert!(extension.contains("Bearer ${TOKEN}"));
         assert!(extension.contains("tok"));
-        assert!(extension.contains(
-            "import { basename, dirname, join, resolve } from \"node:path\";"
-        ));
+        assert!(
+            extension.contains("import { basename, dirname, join, resolve } from \"node:path\";")
+        );
         assert!(extension.contains("basename(dirname(marker))"));
     }
 

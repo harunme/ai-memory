@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delete-single-page surface for the first time.
 
 ### Fixed
+- OpenCode and OMP generated hooks now derive `project_strategy = "repo-root"`
+  project names from the host-visible `.ai-memory.toml` marker directory before
+  sending hook payloads, so dockerized servers no longer fall back to git
+  discovery inside paths they cannot see.
 - `memory_delete_page` (MCP) now accepts `workspace` alongside `project` and
   routes scope through `effective_ids_for_read_args`, the same path the read
   tools use. Previously a project name that lived in multiple workspaces
