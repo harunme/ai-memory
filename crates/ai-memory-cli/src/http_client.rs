@@ -133,7 +133,7 @@ impl ServerEndpoint {
 /// first `/` after the authority (`/wiki`, possibly empty). Trailing slashes
 /// are trimmed from both. A URL with no scheme separator is treated as an
 /// opaque origin with no path.
-fn split_origin_and_path(raw: &str) -> (String, String) {
+pub(crate) fn split_origin_and_path(raw: &str) -> (String, String) {
     let trimmed = raw.trim_end_matches('/');
     if let Some(scheme_end) = trimmed.find("://") {
         let after_scheme = scheme_end + 3;

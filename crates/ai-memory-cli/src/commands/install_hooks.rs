@@ -212,20 +212,41 @@ fn effective_hook_server_url(
     args: &InstallHooksArgs,
     inferred: Option<&InferredMcpConfig>,
 ) -> String {
-    if args.server_url != DEFAULT_SERVER_URL {
-        return normalise_hook_server_url(&args.server_url);
-    }
-    if config.server_url_configured() {
-        return normalise_hook_server_url(&config.server_url);
-    }
-    if let Some(url) = inferred.and_then(|mcp| mcp.hook_server_url.clone()) {
-        return normalise_hook_server_url(&url);
-    }
-    args.server_url.clone()
+    let raw = if args.server_url != DEFAULT_SERVER_URL {
+        args.server_url.clone()
+    } else if config.server_url_configured() {
+        config.server_url.clone()
+    } else if let Some(url) = inferred.and_then(|mcp| mcp.hook_server_url.clone()) {
+        url
+    } else {
+        return args.server_url.clone();
+    };
+    apply_base_path_to_hook_url(&normalise_hook_server_url(&raw), &config.base_path)
 }
 
 fn normalise_hook_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+/// Thread `Config::base_path` into the URL baked into hook commands so
+/// the native hook subcommand (`ai-memory hook`) and the POSIX
+/// `.sh`/`.ps1` scripts POST to `<origin><base>/hook` instead of
+/// 404'ing under a reverse proxy.
+///
+/// Skip when the resolved URL already carries a path component — that
+/// means the operator put the prefix into `AI_MEMORY_SERVER_URL`
+/// directly (`http://host:49374/wiki`) and we'd double it otherwise.
+fn apply_base_path_to_hook_url(url: &str, base_path: &str) -> String {
+    let (origin, existing_path) = crate::http_client::split_origin_and_path(url);
+    if !existing_path.is_empty() {
+        return url.to_string();
+    }
+    let prefix = crate::commands::serve::normalize_prefix(base_path);
+    if prefix.is_empty() {
+        origin
+    } else {
+        format!("{origin}{prefix}")
+    }
 }
 
 fn infer_installed_mcp_config(agent: AgentChoice) -> Option<InferredMcpConfig> {
@@ -1841,6 +1862,48 @@ mod tests {
         assert_eq!(
             effective_hook_server_url(&config, &args, None),
             "http://explicit:49374"
+        );
+    }
+
+    /// Post-audit P1 — the new `ai-memory hook` subcommand (#84) builds
+    /// its request URL by hand, skipping `Config::load` for latency. PR
+    /// #82 made thin-client commands respect `AI_MEMORY_BASE_PATH` via
+    /// `ServerEndpoint::build_url`, but the hook subcommand doesn't go
+    /// through there — so a deployment under `--base-path /wiki` with
+    /// the base set via env (not the URL path) had `ai-memory status`
+    /// working and `ai-memory hook` 404'ing. Fix: install-hooks bakes
+    /// the prefix into the URL it embeds, so hook.rs uses what it's
+    /// given and stays unchanged.
+    #[test]
+    fn hook_server_url_threads_base_path_when_url_has_no_path() {
+        let config = Config {
+            server_url: "http://homelab:49374".into(),
+            base_path: "/wiki".into(),
+            ..Config::default()
+        };
+        let args = default_hook_args();
+        assert_eq!(
+            effective_hook_server_url(&config, &args, None),
+            "http://homelab:49374/wiki",
+            "URL baked into the hook command must carry the base-path so \
+             `ai-memory hook` POSTs to /wiki/hook (not /hook)"
+        );
+    }
+
+    /// If the operator already put the prefix into the URL itself, do
+    /// NOT append `base_path` on top — that would double the prefix to
+    /// `/wiki/wiki`.
+    #[test]
+    fn hook_server_url_does_not_double_base_path_when_already_in_url() {
+        let config = Config {
+            server_url: "http://homelab:49374/wiki".into(),
+            base_path: "/wiki".into(),
+            ..Config::default()
+        };
+        let args = default_hook_args();
+        assert_eq!(
+            effective_hook_server_url(&config, &args, None),
+            "http://homelab:49374/wiki"
         );
     }
 
