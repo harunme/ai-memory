@@ -161,6 +161,31 @@ jobs:
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
           "$hash  $zip" | Out-File -Encoding ascii "$zip.sha256"
 
+      - name: Smoke test release zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = "ai-memory-windows-x86_64.zip"
+          $smoke = "dist/smoke-windows-zip"
+          Expand-Archive $zip -DestinationPath $smoke -Force
+          & "$smoke/ai-memory.exe" --version
+          foreach ($path in @(
+            "hooks",
+            "crates/ai-memory-cli/templates/config.default.toml",
+            "docs/install.md",
+            "docs/windows.md",
+            "README.md",
+            "LICENSE"
+          )) {
+            if (-not (Test-Path "$smoke/$path")) {
+              throw "Windows release zip missing $path"
+            }
+          }
+          $checksum = Get-Content "$zip.sha256" -Raw
+          if ($checksum -notmatch '^[0-9a-f]{64}  ai-memory-windows-x86_64\.zip\r?\n?$') {
+            throw "Windows release zip checksum is not sha256sum format"
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: ai-memory-windows-x86_64

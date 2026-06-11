@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Tagged releases now publish a native Windows x86_64 zip artifact
+  (`ai-memory-windows-x86_64.zip`) with `ai-memory.exe`, hooks, default
+  config template, checksums, and Windows install docs, giving native
+  Windows agents a no-toolchain path to the fast direct-binary hook mode.
 
 ## [0.13.0] - 2026-06-08
 ### Added
