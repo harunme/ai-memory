@@ -624,9 +624,11 @@ The `serve` subcommand also accepts:
 
 On Windows, see [`docs/windows.md`](windows.md). The short version: run
 the install commands from the same environment that launches the agent.
-WSL2-launched agents need WSL paths and POSIX `.sh` hooks. Native Claude Code
-uses Git Bash `.sh` hooks with Windows paths converted to `/c/...`; other
-native Windows script-hook agents use PowerShell `.ps1` defaults.
+WSL2-launched agents need WSL paths and POSIX `.sh` hooks. Native Windows
+agents can use the tagged `ai-memory-windows-x86_64.zip`, the Docker Desktop
+wrapper, or a source build. Native Claude Code uses direct `ai-memory.exe hook`
+commands by default; other native Windows script-hook agents use PowerShell
+`.ps1` defaults.
 
 When run from source, `install-hooks` finds the bundled scripts in
 the repo's `hooks/` automatically:
