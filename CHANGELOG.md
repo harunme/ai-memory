@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Native hook drain and handoff timings can now be raised with
+  `AI_MEMORY_HOOK_DRAIN_TIMEOUT_MINUTES`,
+  `AI_MEMORY_HOOK_HANDOFF_TIMEOUT_MINUTES`,
+  `AI_MEMORY_HOOK_START_BUDGET_MINUTES`, and
+  `AI_MEMORY_HOOK_END_BUDGET_MINUTES` for high-latency or large-backlog
+  instances. Defaults preserve the existing short hook behavior; invalid,
+  zero, or overly large values fall back or clamp safely.
 
 ## [0.16.0] - 2026-06-11
 ### Added

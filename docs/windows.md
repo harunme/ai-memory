@@ -224,6 +224,26 @@ native on an i7-6700HQ). Notes:
   Set the env var before running `install-hooks` so the chosen platform
   is baked into the rendered hook commands.
 
+### Tuning the spool timings (high-latency instances)
+
+The native hook spools events locally and drains them to the server at session
+boundaries. The built-in timings stay short by default, but high-latency or
+large-backlog instances can raise them with whole-minute overrides. Unlike
+`AI_MEMORY_HOOK_PLATFORM`, these are read by the hook **at runtime**, so they
+apply to the agent's environment (no re-`install-hooks` needed):
+
+| Env var | Built-in default | Max override | What it caps |
+|---|---:|---:|---|
+| `AI_MEMORY_HOOK_DRAIN_TIMEOUT_MINUTES` | 3 seconds | 60 minutes | each event POST during a drain |
+| `AI_MEMORY_HOOK_HANDOFF_TIMEOUT_MINUTES` | 3 seconds | 60 minutes | the synchronous `session-start` handoff GET |
+| `AI_MEMORY_HOOK_START_BUDGET_MINUTES` | 3 seconds | 60 minutes | total time the `session-start` cleanup drain may spend |
+| `AI_MEMORY_HOOK_END_BUDGET_MINUTES` | 10 seconds | 60 minutes | total time the `session-end` flush may spend |
+
+Values must be positive whole minutes. Missing, empty, non-numeric, or zero
+values fall back to the built-in defaults; values above 60 are clamped. The
+budgets cap how long a session boundary blocks, so leave headroom over the
+per-request timeout for several events to drain per boundary.
+
 ## Current Harness Caveats
 
 Windows hook support is new and needs real-world testing against native

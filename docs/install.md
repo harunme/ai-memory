@@ -324,6 +324,21 @@ then stages runnable copies under `~/.local/share/ai-memory/hooks/<agent>/` so
 the agent can execute files owned by your user. Re-run `install-hooks --apply`
 after package upgrades to refresh those staged copies.
 
+Native `ai-memory hook --event ...` commands spool events locally and drain them
+at session boundaries. The built-in timings stay short by default, but
+high-latency or large-backlog instances can raise them with whole-minute runtime
+env vars in the agent's environment; no `install-hooks` rerun is needed:
+
+| Env var | Built-in default | Max override | What it caps |
+|---|---:|---:|---|
+| `AI_MEMORY_HOOK_DRAIN_TIMEOUT_MINUTES` | 3 seconds | 60 minutes | each event POST during a drain |
+| `AI_MEMORY_HOOK_HANDOFF_TIMEOUT_MINUTES` | 3 seconds | 60 minutes | the synchronous `session-start` handoff GET |
+| `AI_MEMORY_HOOK_START_BUDGET_MINUTES` | 3 seconds | 60 minutes | total time the `session-start` cleanup drain may spend |
+| `AI_MEMORY_HOOK_END_BUDGET_MINUTES` | 10 seconds | 60 minutes | total time the `session-end` flush may spend |
+
+Values must be positive whole minutes. Missing, empty, non-numeric, or zero
+values fall back to the built-in defaults; values above 60 are clamped.
+
 ### Native service operations
 
 ```bash

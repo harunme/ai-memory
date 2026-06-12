@@ -76,9 +76,12 @@ markdown stays the source of truth.
 **Steady-state loop:**
 
 1. Agent CLI emits a lifecycle hook (SessionStart, UserPromptSubmit,
-   PostToolUse, …) → vendored shell script `curl`s the event JSON to
-   `POST /hook` with a sub-second timeout. Agent never blocks; saturated
-   servers return HTTP 429 instead of queueing unbounded work.
+   PostToolUse, …). Shell-script hooks `curl` event JSON to `POST /hook`
+   with a short timeout. Native `ai-memory hook --event ...` commands spool
+   events locally and drain them at session boundaries; high-latency
+   operators can raise the drain/handoff caps with minute-based env vars.
+   Agent hot paths never block on the network; saturated servers return HTTP
+   429 instead of queueing unbounded work.
 2. Server's hook router sanitises the payload (the only path from
    untrusted text into the store), assigns an [`ObservationKind`], and
    enqueues a `WriteCmd` to the writer actor. `log.md` gets an
