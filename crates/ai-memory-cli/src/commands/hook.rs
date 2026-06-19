@@ -21,6 +21,7 @@ use crate::cli::HookArgs;
 
 use super::hook_capture::{build_client, extract_cwd, get_handoff, marker_query_suffix};
 use super::hook_spool;
+use super::render_shared::strip_windows_verbatim_prefix;
 
 // All drain/handoff timings default to the current short values and can be
 // overridden by whole-minute env vars for very high-latency or large-backlog
@@ -226,19 +227,48 @@ pub async fn run(data_dir: Option<PathBuf>, args: HookArgs) -> anyhow::Result<()
 /// fast-path skips config for latency). Mirrors `config.rs`: explicit
 /// `--data-dir`, else `AI_MEMORY_DATA_DIR`, else the platform local-data dir.
 fn resolve_data_dir(data_dir: Option<&Path>) -> PathBuf {
-    data_dir
+    let dir = data_dir
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("AI_MEMORY_DATA_DIR").map(PathBuf::from))
         .unwrap_or_else(|| {
             dirs::data_local_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("ai-memory")
-        })
+        });
+    // A verbatim `\\?\…` data dir — what `install-hooks` baked into
+    // settings.json before #116 was fixed — silently breaks the hook-spool
+    // write, dropping every event. Normalise it so an already-installed hook
+    // recovers on the next session without re-running `install-hooks`.
+    match dir.to_str() {
+        Some(s) if s.starts_with(r"\\?\") => {
+            PathBuf::from(strip_windows_verbatim_prefix(s).into_owned())
+        }
+        _ => dir,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_data_dir_strips_verbatim_prefix_from_baked_arg() {
+        // A pre-#116 install baked a verbatim `--data-dir` into settings.json;
+        // the hook must resolve it to the plain path so the spool write lands
+        // and enqueue/drain agree on the directory.
+        let resolved =
+            resolve_data_dir(Some(Path::new(r"\\?\C:\Users\me\AppData\Local\ai-memory")));
+        assert_eq!(
+            resolved,
+            PathBuf::from(r"C:\Users\me\AppData\Local\ai-memory")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_leaves_plain_path_untouched() {
+        let resolved = resolve_data_dir(Some(Path::new(r"C:\Users\me\ai-memory")));
+        assert_eq!(resolved, PathBuf::from(r"C:\Users\me\ai-memory"));
+    }
 
     #[test]
     fn should_incremental_drain_only_post_tool_use_over_threshold() {

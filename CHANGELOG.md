@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Native Windows Claude Code hooks no longer silently drop every captured event.
+  On Windows, `install-hooks` canonicalizes the data dir, which yields a verbatim
+  extended-length path (`\\?\C:\…`), and that prefix was baked verbatim into the
+  generated `--data-dir` for each native hook command. At capture time the
+  hook-spool write under a `\\?\`-prefixed data dir never lands, and the failure
+  was swallowed (`let _ = enqueue(...)`), so every `UserPromptSubmit` /
+  `PreToolUse` / `PostToolUse` / `PreCompact` / `Stop` / `SessionEnd` event was
+  lost while each hook still exited 0 — only `SessionStart` (handoff retrieval)
+  kept working, masking the loss. The data dir is now de-verbatim'd both when
+  rendering the hook command (new installs emit a plain `--data-dir`) and when
+  the hook resolves its data dir at capture time (an already-installed hook
+  recovers on the next session without re-running `install-hooks`). (issue #116)
+
 ## [1.1.2] - 2026-06-19
 
 ### Added
