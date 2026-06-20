@@ -21,6 +21,8 @@ use std::path::Path;
 
 use serde_json::json;
 
+use crate::commands::path_util::strip_windows_verbatim_prefix;
+
 /// Claude Code lifecycle events ai-memory hooks. Each pair is
 /// `(event-name-in-Claude-Code-settings, POSIX hook-script-filename)`.
 ///
@@ -685,36 +687,11 @@ enum NativeQuote {
     Windows,
 }
 
-/// Strip the Windows extended-length (verbatim) prefix from a path string so it
-/// can be safely embedded in a hook command line.
-///
-/// `install-hooks` canonicalizes the data dir (see `config.rs`), which on
-/// Windows yields a verbatim path — `\\?\C:\Users\…\ai-memory`, or
-/// `\\?\UNC\server\share` for a network location. Emitting that verbatim form
-/// into the native hook command silently breaks the hook-spool write at capture
-/// time, so every lifecycle event is dropped while each hook still exits 0
-/// (issue #116). Rendering the plain path avoids that. A no-op for any path
-/// without the prefix — including every POSIX path — so it is safe to apply
-/// before either quote style.
-pub(crate) fn strip_windows_verbatim_prefix(path: &str) -> Cow<'_, str> {
-    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-        // `\\?\UNC\server\share` → `\\server\share`
-        Cow::Owned(format!(r"\\{rest}"))
-    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
-        // `\\?\C:\…` → `C:\…`
-        Cow::Borrowed(rest)
-    } else {
-        Cow::Borrowed(path)
-    }
-}
-
 fn native_data_dir_arg(data_dir: Option<&Path>, quote: NativeQuote) -> String {
     let Some(data_dir) = data_dir else {
         return String::new();
     };
-    // A canonicalized data dir is verbatim on Windows (`\\?\C:\…`); emitting
-    // that into the hook command silently breaks the native hook-spool write
-    // (#116), so render the plain path. No-op for non-verbatim / POSIX paths.
+    // Render safe verbatim Windows data-dir forms as plain paths (#116).
     let lossy = data_dir.to_string_lossy();
     let path = strip_windows_verbatim_prefix(&lossy);
     match quote {
@@ -1361,32 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_windows_verbatim_prefix_handles_disk_unc_and_plain() {
-        let strip = strip_windows_verbatim_prefix;
-        // Disk verbatim → plain drive path.
-        assert_eq!(
-            &*strip(r"\\?\C:\Users\me\AppData\Local\ai-memory"),
-            r"C:\Users\me\AppData\Local\ai-memory"
-        );
-        // UNC verbatim → plain UNC path.
-        assert_eq!(&*strip(r"\\?\UNC\server\share\m"), r"\\server\share\m");
-        // Already-plain Windows path is left untouched.
-        assert_eq!(&*strip(r"C:\Users\me\ai-memory"), r"C:\Users\me\ai-memory");
-        // POSIX path is left untouched.
-        assert_eq!(
-            &*strip("/home/alice/.local/share/ai-memory"),
-            "/home/alice/.local/share/ai-memory"
-        );
-    }
-
-    #[test]
     fn windows_native_command_strips_verbatim_data_dir() {
-        // Regression for #116: install-hooks canonicalizes the data dir to a
-        // verbatim `\\?\C:\…` path; the baked `--data-dir` must be the plain
-        // form, or the native hook-spool write silently drops every event.
+        // Regression for #116: native hook commands must render a plain data dir.
         let cmd = hook_command(
             &PathBuf::from(
-                r"C:\Users\me\AppData\Local\ai-memory\hooks\claude-code\post-tool-use.sh",
+                r"C:/Users/me/AppData/Local/ai-memory/hooks/claude-code/post-tool-use.sh",
             ),
             "https://srv.example.com",
             None,
@@ -1400,6 +1356,7 @@ mod tests {
             cmd.contains(r#"--data-dir "C:\Users\me\AppData\Local\ai-memory""#),
             "plain data dir expected: {cmd}"
         );
+        assert!(cmd.contains("hook --event post-tool-use"), "{cmd}");
         assert!(
             !cmd.contains(r"\\?\"),
             "verbatim prefix must not leak into the hook command: {cmd}"

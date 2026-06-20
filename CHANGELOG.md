@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept working, masking the loss. The data dir is now de-verbatim'd both when
   rendering the hook command (new installs emit a plain `--data-dir`) and when
   the hook resolves its data dir at capture time (an already-installed hook
-  recovers on the next session without re-running `install-hooks`). (issue #116)
+  recovers on the next session without re-running `install-hooks`), and future
+  spool enqueue failures emit a sanitized stderr warning instead of staying fully
+  silent. (issue #116)
 
 ## [1.1.2] - 2026-06-19
 

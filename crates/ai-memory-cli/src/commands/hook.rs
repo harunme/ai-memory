@@ -21,7 +21,7 @@ use crate::cli::HookArgs;
 
 use super::hook_capture::{build_client, extract_cwd, get_handoff, marker_query_suffix};
 use super::hook_spool;
-use super::render_shared::strip_windows_verbatim_prefix;
+use super::path_util::strip_windows_verbatim_prefix;
 
 // All drain/handoff timings default to the current short values and can be
 // overridden by whole-minute env vars for very high-latency or large-backlog
@@ -164,7 +164,11 @@ pub async fn run(data_dir: Option<PathBuf>, args: HookArgs) -> anyhow::Result<()
         args.auth_token.as_deref(),
         oidc_present,
     );
-    let _ = hook_spool::enqueue(&spool, &entry);
+    if hook_spool::enqueue(&spool, &entry).is_err() {
+        eprintln!(
+            "ai-memory hook warning: failed to spool lifecycle event; capture for this event was skipped"
+        );
+    }
 
     // Mid-session catch-up: per-event hooks only enqueue, so a heavy session
     // outpaces the boundary-only drain and the spool grows until the next
@@ -235,10 +239,7 @@ fn resolve_data_dir(data_dir: Option<&Path>) -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("ai-memory")
         });
-    // A verbatim `\\?\…` data dir — what `install-hooks` baked into
-    // settings.json before #116 was fixed — silently breaks the hook-spool
-    // write, dropping every event. Normalise it so an already-installed hook
-    // recovers on the next session without re-running `install-hooks`.
+    // Recover already-installed hooks that baked a safe verbatim data-dir form.
     match dir.to_str() {
         Some(s) if s.starts_with(r"\\?\") => {
             PathBuf::from(strip_windows_verbatim_prefix(s).into_owned())
@@ -253,9 +254,7 @@ mod tests {
 
     #[test]
     fn resolve_data_dir_strips_verbatim_prefix_from_baked_arg() {
-        // A pre-#116 install baked a verbatim `--data-dir` into settings.json;
-        // the hook must resolve it to the plain path so the spool write lands
-        // and enqueue/drain agree on the directory.
+        // Recover safe verbatim data dirs baked by older installs (#116).
         let resolved =
             resolve_data_dir(Some(Path::new(r"\\?\C:\Users\me\AppData\Local\ai-memory")));
         assert_eq!(

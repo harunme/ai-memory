@@ -29,6 +29,7 @@ pub mod lint;
 pub mod llm_test;
 pub mod move_project;
 pub mod openclaw_plugin;
+pub mod path_util;
 pub mod pending_writes;
 pub mod purge_project;
 pub mod read_page;
