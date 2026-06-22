@@ -251,7 +251,7 @@ pub async fn drain(
                     result.dropped += 1;
                 } else {
                     // Persist the bumped attempt count for the next boundary.
-                    let _ = rewrite_entry(&path, &entry);
+                    let _ = note_retry_persist(rewrite_entry(&path, &entry));
                     result.remaining += 1;
                 }
             }
@@ -269,6 +269,22 @@ fn rewrite_entry(path: &Path, entry: &SpoolEntry) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(entry)?;
     write_private(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Report whether persisting a bumped retry count landed; on failure, emit a
+/// sanitized stderr warning (no path — a raw spool path can be a Windows verbatim
+/// `\\?\…` path) instead of swallowing it, so a poison entry can't retry
+/// invisibly until it ages out. Fire-and-forget: warns only, never panics or
+/// blocks; the returned bool is consumed only by tests.
+fn note_retry_persist(outcome: std::io::Result<()>) -> bool {
+    if outcome.is_err() {
+        eprintln!(
+            "ai-memory hook warning: failed to persist spool retry count; \
+             event may retry until it ages out"
+        );
+        return false;
+    }
+    true
 }
 
 /// Resolve the bearer for a synchronous request (the session-start handoff
@@ -568,5 +584,69 @@ mod tests {
             .unwrap();
         }
         assert_eq!(spool_len(&spool), 3);
+    }
+
+    #[test]
+    fn note_retry_persist_reports_failure() {
+        // Root-proof: feed a synthetic error so the warn / not-persisted branch is
+        // exercised without provoking a real FS fault (the Docker CI gate runs as
+        // root and ignores chmod-based read-only dirs).
+        let failed: std::io::Result<()> = Err(std::io::Error::other("simulated rewrite failure"));
+        assert!(
+            !note_retry_persist(failed),
+            "a failed persist is reported as not-persisted, not swallowed"
+        );
+    }
+
+    #[test]
+    fn note_retry_persist_reports_success() {
+        assert!(
+            note_retry_persist(Ok(())),
+            "a successful persist is reported as persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_stays_robust_when_retry_count_cannot_persist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        let e = entry_for(
+            "http://127.0.0.1:1/hook?event=stuck".into(),
+            "{}".into(),
+            None,
+            false,
+        );
+        enqueue(&spool, &e).unwrap();
+
+        // Make the atomic rewrite fail in a way that survives root (the Docker gate
+        // runs as root, so a chmod read-only dir wouldn't fault): occupy the entry's
+        // `<name>.json.tmp` path with a directory, so `rewrite_entry`'s temp-file
+        // write (an `OpenOptions` create) can't be created. `list_entries` matches
+        // only `*.json`, so the `.json.tmp` directory is ignored by the drain.
+        let entry_path = list_entries(&spool).unwrap().into_iter().next().unwrap();
+        let mut blocker = entry_path.into_os_string();
+        blocker.push(".tmp");
+        std::fs::create_dir(PathBuf::from(blocker)).unwrap();
+
+        // The persist fails, but drain must stay fire-and-forget: no panic, the
+        // event is still counted as remaining, nothing dropped, the entry survives.
+        let r = drain(
+            &spool,
+            tmp.path(),
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(r.sent, 0);
+        assert_eq!(r.dropped, 0, "a persist failure must not drop the event");
+        assert_eq!(
+            r.remaining, 1,
+            "the event stays queued for the next boundary"
+        );
+        assert_eq!(
+            list_entries(&spool).unwrap().len(),
+            1,
+            "the spool entry survives a failed rewrite"
+        );
     }
 }

@@ -35,9 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aliases still prefix-match later events into the same project.
 - Updated `git2` to the patched 0.21 line to clear new RustSec unsoundness
   advisories in libgit2 bindings.
+<<<<<<< HEAD
 - Native Claude Code hooks now capture array-shaped `tool_response` content and
   recognize the native `user-prompt-submit` event token, restoring prompt text
   and tool output bodies for native installs.
+- The headless hook spool now warns (instead of silently swallowing) when it
+  cannot persist a bumped retry-attempt count back to disk, matching the v1.1.3
+  enqueue-failure fix. A failed atomic rewrite previously lost the in-memory
+  attempt bump, so a poison spool entry never reached `MAX_ATTEMPTS` and kept
+  retrying on every drain boundary with no operator signal until the 7-day
+  age-out pruned it. The warning is sanitized and carries no path (a raw spool
+  path can be a Windows verbatim `\\?\…` path).
 
 ## [1.1.3] - 2026-06-20
 
