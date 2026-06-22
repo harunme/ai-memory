@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /admin/auto-improve/report` and `ai-memory auto-improve-report`, with
   JSON and human CLI output for recent run counts, proposal outcomes, terminal
   rates, and operational findings without staging pending proposals.
+- Added `docs/auto-improve-eval-gates.md` plus dependency-free Python and shell
+  scorer templates for `[auto_improve.eval]` proposal gates.
 - Hook spool drains now use `POST /hook/batch` when the server supports it,
   grouping compatible queued lifecycle events into bounded batches to amortize
   remote request latency. Older servers fall back to the existing per-event

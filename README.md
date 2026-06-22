@@ -143,7 +143,9 @@ priors are at the [bottom](#influences-and-prior-art).
   available for manual catch-up or targeted reruns. `ai-memory
   auto-improve-report --workspace <w> --project <p>` returns a read-only
   telemetry report for recent auto-improvement outcomes without staging or
-  creating proposals.
+  creating proposals. See
+  [`docs/auto-improve-eval-gates.md`](docs/auto-improve-eval-gates.md) for
+  example executable eval scorers.
 
   Existing installs do not need per-project migration. The scheduler initializes
   a per-project first-run watermark so historical sessions are not reviewed
