@@ -417,6 +417,10 @@ fn uninstall_purge_data_apply_wipes() {
         .args(["uninstall", "--apply", "--yes", "--purge-data"])
         .env("HOME", home.path())
         .env("AI_MEMORY_DATA_DIR", data.path())
+        // Exercises the WIPE, not the live-process guard; opt out so an
+        // unrelated `ai-memory` on the machine can't make it flake. The
+        // dedicated guard test below does NOT set this.
+        .env("AI_MEMORY_TEST_NO_PROCESS_GUARD", "1")
         .output()
         .unwrap();
     assert!(
@@ -451,6 +455,9 @@ fn uninstall_dry_run_previews_purge() {
         .args(["uninstall", "--purge-data"]) // dry-run: no --apply
         .env("HOME", home.path())
         .env("AI_MEMORY_DATA_DIR", data.path())
+        // Dry-run still hits the purge guard before previewing; opt out so an
+        // unrelated live `ai-memory` can't flake the preview.
+        .env("AI_MEMORY_TEST_NO_PROCESS_GUARD", "1")
         .output()
         .unwrap();
     assert!(out.status.success());

@@ -14,6 +14,18 @@ pub const BIN_NAME: &str = "ai-memory";
 /// process and any threads of it).
 #[must_use]
 pub fn sibling_processes() -> Vec<sysinfo::Pid> {
+    // Test opt-out. The destructive-command tests would otherwise flake
+    // non-deterministically: a dev box (and a parallel test run) almost always
+    // has some *other* `ai-memory` process alive, which the real scan rightly
+    // refuses against. Two seams, neither reachable in a normal shipped run:
+    //   - `cfg!(test)` — the crate's own in-process unit tests (reset / reindex
+    //     / restore) skip the scan.
+    //   - `AI_MEMORY_TEST_NO_PROCESS_GUARD` — a spawned `ai-memory` a test
+    //     launches reads it from its env and skips. The dedicated, `#[ignore]`d
+    //     guard test launches WITHOUT it, so the guard itself stays covered.
+    if cfg!(test) || std::env::var_os("AI_MEMORY_TEST_NO_PROCESS_GUARD").is_some() {
+        return Vec::new();
+    }
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let me = sysinfo::Pid::from_u32(std::process::id());

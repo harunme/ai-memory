@@ -26,7 +26,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use jiff::Timestamp;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -40,6 +40,11 @@ use crate::synth::synthesize_session_page;
 /// background tasks during tool-heavy bursts. Saturated servers return 429 so
 /// callers can drop or retry instead of growing memory without bound.
 pub const DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT: usize = 1024;
+
+/// Maximum events accepted in one `POST /hook/batch` request. This matches the
+/// client drain cap so a single request cannot monopolize ingest capacity or
+/// allocate/process an unbounded vector of hook events.
+pub const MAX_HOOK_BATCH_ITEMS: usize = 256;
 
 /// Maximum cwd-resolution cache entries kept per server process. The cache is
 /// an optimization only; evicted entries are re-resolved through the writer.
@@ -190,6 +195,7 @@ pub struct HookState {
 pub fn hook_router(state: HookState) -> Router {
     Router::new()
         .route("/hook", post(handle_hook))
+        .route("/hook/batch", post(handle_hook_batch))
         .route("/handoff", get(handle_handoff))
         .with_state(Arc::new(state))
 }
@@ -218,6 +224,101 @@ async fn handle_hook(
         process_envelope(state, env, actor_user).await;
     });
     (StatusCode::ACCEPTED, "queued")
+}
+
+/// One event in a `POST /hook/batch` request — the same `{url, body}` pair a
+/// single `POST /hook` would carry, so the server reuses the per-event query
+/// parsing instead of inventing a second wire shape.
+#[derive(Debug, Deserialize)]
+pub struct HookBatchItem {
+    /// Full hook URL including the `?event=…&agent=…` query (as the client
+    /// spooled it); only the query is read here — the host/path are the
+    /// client's record of where the event was bound.
+    pub url: String,
+    /// Raw JSON event payload.
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+/// Response to `POST /hook/batch`: the length of the contiguous leading prefix
+/// of items that committed (equals the request length on full success).
+#[derive(Debug, Serialize)]
+pub struct HookBatchAck {
+    /// Items committed, oldest-first. The client deletes exactly this many
+    /// spool entries and re-sends the rest next pass.
+    pub accepted: usize,
+}
+
+/// Batch sibling of [`handle_hook`]. Accepts many spooled events in ONE request
+/// so a draining client amortizes the per-request cost (TLS + network RTT + the
+/// edge auth hop) over the whole batch instead of paying it per event — the
+/// dominant cost when a backlog drains to a remote, gated server, and the reason
+/// a sequential per-event drain falls behind under parallel load.
+///
+/// Unlike `handle_hook` (which spawns and answers `202` immediately), the batch
+/// is processed INLINE and FAIL-FAST: items run in order and the first error
+/// stops the batch, returning `accepted = <committed prefix>`. Inline + fail-fast
+/// keeps every item's side effects (a SessionEnd writes a session page + a
+/// handoff) inside the response window, so a partially-applied batch never
+/// commits beyond what `accepted` reports — the client deletes only that prefix.
+async fn handle_hook_batch(
+    State(state): State<Arc<HookState>>,
+    actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    Json(items): Json<Vec<HookBatchItem>>,
+) -> impl IntoResponse {
+    if items.len() > MAX_HOOK_BATCH_ITEMS {
+        warn!(
+            items = items.len(),
+            max = MAX_HOOK_BATCH_ITEMS,
+            "hook batch too large; rejecting before processing"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(HookBatchAck { accepted: 0 }),
+        );
+    }
+    // All items in a batch share the drain's single identity, so the actor is
+    // captured once from the batch request (mirrors `handle_hook`).
+    let actor_user = actor_ext
+        .map(|axum::Extension(ctx)| ctx.user)
+        .unwrap_or_default();
+    // Hold capacity proportional to the batch size so batch ingress cannot
+    // exceed the same in-flight event bound as single `/hook` requests. Empty
+    // batches still acquire one permit to respect backpressure consistently.
+    let permits = u32::try_from(items.len().max(1)).unwrap_or(u32::MAX);
+    let Ok(permit) = state
+        .ingest_semaphore
+        .clone()
+        .try_acquire_many_owned(permits)
+    else {
+        warn!("hook batch ingest saturated; rejecting with 429");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(HookBatchAck { accepted: 0 }),
+        );
+    };
+    let _permit = permit;
+    let mut accepted = 0usize;
+    for item in items {
+        let query = parse_hook_query(&item.url);
+        let env = HookEnvelope::from_query_and_body(query, item.body);
+        if let Err(e) = process(&state, env, actor_user.clone()).await {
+            warn!(error = %e, accepted, "hook batch item failed; stopping (fail-fast)");
+            break;
+        }
+        accepted += 1;
+    }
+    (StatusCode::OK, Json(HookBatchAck { accepted }))
+}
+
+/// Parse the `?event=…&agent=…` query of a spooled hook URL into [`HookQuery`],
+/// mirroring axum's `Query` extractor (both use `serde_urlencoded`). A URL with
+/// no query, or an unparseable one, yields the default (empty `event`) — which
+/// `from_query_and_body` maps to an unknown event that `process` skips, so a
+/// malformed item can't error the whole batch.
+fn parse_hook_query(url: &str) -> HookQuery {
+    let qs = url.split_once('?').map_or("", |(_, q)| q);
+    serde_urlencoded::from_str(qs).unwrap_or_default()
 }
 
 /// Query params for `GET /handoff`.
@@ -1114,6 +1215,110 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
+    #[tokio::test]
+    async fn handle_hook_batch_acks_processed_count() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        // Two events sharing a session, carried in ONE batch request — the per
+        // event `?event=…&agent=…` query is parsed from each item's `url`.
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=session-start&agent=claude-code".into(),
+                body: serde_json::json!({ "session_id": "batch-s1" }),
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=user-prompt-submit&agent=claude-code".into(),
+                body: serde_json::json!({ "session_id": "batch-s1", "prompt": "hello" }),
+            },
+        ];
+
+        let response = handle_hook_batch(State(Arc::new(state)), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(ack["accepted"], 2, "both events committed, oldest-first");
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_returns_429_when_saturated() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        state.ingest_semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+
+        let response = handle_hook_batch(
+            State(Arc::new(state)),
+            None,
+            Json(vec![HookBatchItem {
+                url: "http://h/hook?event=session-start&agent=claude-code".into(),
+                body: serde_json::json!({}),
+            }]),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_rejects_over_client_item_cap() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let items: Vec<HookBatchItem> = (0..=MAX_HOOK_BATCH_ITEMS)
+            .map(|i| HookBatchItem {
+                url: format!("http://h/hook?event=user-prompt-submit&agent=claude-code&i={i}"),
+                body: serde_json::json!({ "session_id": "too-many", "prompt": "nope" }),
+            })
+            .collect();
+
+        let response = handle_hook_batch(State(Arc::new(state)), None, Json(items))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(ack["accepted"], 0);
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_acquires_capacity_per_item() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        state.ingest_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=session-start&agent=claude-code".into(),
+                body: serde_json::json!({ "session_id": "bounded-batch" }),
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=user-prompt-submit&agent=claude-code".into(),
+                body: serde_json::json!({ "session_id": "bounded-batch", "prompt": "hello" }),
+            },
+        ];
+
+        let response = handle_hook_batch(State(Arc::new(state)), None, Json(items))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn parse_hook_query_reads_event_and_agent() {
+        let q = parse_hook_query("http://h/hook?event=stop&agent=claude-code&cwd=%2Ftmp");
+        assert_eq!(q.event, "stop");
+        assert_eq!(q.agent.as_deref(), Some("claude-code"));
+        assert_eq!(q.cwd.as_deref(), Some("/tmp"));
+        // No query string at all → default (empty event), which `process` skips.
+        assert_eq!(parse_hook_query("http://h/hook").event, "");
+    }
+
     /// An event without a cwd must fall back to the server defaults.
     #[tokio::test]
     async fn process_with_missing_cwd_falls_back_to_state_defaults() {
@@ -1492,6 +1697,64 @@ mod tests {
             by_name,
             Some(resolved),
             "stored repo_path with LIKE wildcards must NOT match"
+        );
+    }
+
+    /// A real `repo_path` containing a `_` must prefix-match its literal child
+    /// cwd (escaped, not rejected) AND must NOT match a path that differs only
+    /// where the `_` sits — proving `_` is literal, never a single-char
+    /// wildcard. Pre-fix, both the cwd `_` rejection and the repo_path `_`
+    /// rejection made any `my_app`-style project silently un-matchable.
+    #[tokio::test]
+    async fn resolve_matches_literal_underscore_repo_path() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let ws = state
+            .writer
+            .get_or_create_workspace(String::from(DEFAULT_WORKSPACE_NAME))
+            .await
+            .unwrap();
+        let parent = state
+            .writer
+            .get_or_create_project(
+                ws,
+                String::from("my_app"),
+                Some(String::from("/repo/my_app")),
+            )
+            .await
+            .unwrap();
+
+        // Literal child → resolves to the existing `my_app` project.
+        let (_, resolved) = resolve_project_ids(
+            &state,
+            Some("/repo/my_app/src"),
+            None,
+            None,
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resolved, parent,
+            "a repo_path with `_` must prefix-match its literal child"
+        );
+
+        // `/repo/myXapp/...` must NOT match `/repo/my_app` (the `_` is literal,
+        // not a wildcard that would match the `X`).
+        let (_, other) = resolve_project_ids(
+            &state,
+            Some("/repo/myXapp/src"),
+            None,
+            None,
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            other, parent,
+            "`_` must be literal, not a single-character LIKE wildcard"
         );
     }
 
@@ -2646,7 +2909,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = make_state(&tmp).await;
 
-        let main_dir = tmp.path().join("repo");
+        // Canonicalize the temp root before deriving the repo paths. On macOS
+        // `TempDir` lives under `/var/folders/...`, a symlink to
+        // `/private/var/...`; git2's repo discovery records the resolved
+        // `/private/var/...` path, and the sibling cwd below is prefix-matched
+        // against it — so both sides must agree on the resolved form. (The `_`
+        // in the macOS temp hash no longer breaks the match:
+        // `find_project_by_cwd_prefix` now escapes `%`/`_` and matches them
+        // literally, so this also exercises that fix on macOS.)
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let main_dir = root.join("repo");
         init_repo_with_commit(&main_dir);
         let app_dir = main_dir.join("app");
         let sibling_dir = main_dir.join("sibling");

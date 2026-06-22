@@ -346,13 +346,29 @@ async fn fire_hook_and_settle(
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "hook must accept");
     // Drain the response body before settling so the connection releases.
     let _ = response_body_text(resp).await;
-    // `process_envelope` is `tokio::spawn`-ed; give it a generous window
-    // to land the active_project write on a loaded machine. Empirically a
-    // single yield is enough; we go higher for headroom in CI.
-    for _ in 0..20 {
+    // `process_envelope` is `tokio::spawn`-ed; poll a read for THIS session
+    // until its write is actually visible, instead of guessing a fixed settle
+    // time. A fixed sleep races under heavy load — the observed flake was a
+    // loaded full-workspace run where a session's active-project write hadn't
+    // landed yet, so its read saw `{hits: []}`. Polling waits exactly as long
+    // as needed (normally one iteration), with a generous cap that only burns
+    // if the write genuinely never lands (a real bug the downstream assert
+    // then reports).
+    let expected = number_word(project_index);
+    for _ in 0..200 {
         tokio::task::yield_now().await;
+        let probe = router
+            .clone()
+            .oneshot(mcp_query_request(user, Some(session_id)))
+            .await
+            .expect("settle probe");
+        if probe.status() == StatusCode::OK
+            && extract_tool_text(&response_body_text(probe).await).contains(expected)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    tokio::time::sleep(Duration::from_millis(15)).await;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

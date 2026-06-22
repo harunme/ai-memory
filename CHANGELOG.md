@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, receives proposal JSON on stdin, fails closed on command/timeout/JSON
   errors or insufficient score delta, and records eval failures as rejected
   candidates without running from hook paths.
+- Hook spool drains now use `POST /hook/batch` when the server supports it,
+  grouping compatible queued lifecycle events into bounded batches to amortize
+  remote request latency. Older servers fall back to the existing per-event
+  `POST /hook` path.
 
 ### Fixed
 - Auto-improvement eval gates now apply timeouts to the full child interaction,
@@ -35,7 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aliases still prefix-match later events into the same project.
 - Updated `git2` to the patched 0.21 line to clear new RustSec unsoundness
   advisories in libgit2 bindings.
-<<<<<<< HEAD
 - Native Claude Code hooks now capture array-shaped `tool_response` content and
   recognize the native `user-prompt-submit` event token, restoring prompt text
   and tool output bodies for native installs.
