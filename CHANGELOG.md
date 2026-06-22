@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aliases still prefix-match later events into the same project.
 - Updated `git2` to the patched 0.21 line to clear new RustSec unsoundness
   advisories in libgit2 bindings.
+- Native Claude Code hooks now capture array-shaped `tool_response` content and
+  recognize the native `user-prompt-submit` event token, restoring prompt text
+  and tool output bodies for native installs.
 
 ## [1.1.3] - 2026-06-20
 
