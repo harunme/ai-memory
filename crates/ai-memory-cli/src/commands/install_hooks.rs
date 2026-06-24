@@ -175,8 +175,8 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     }
     let strategy = args.project_strategy.baked();
     match args.agent {
-        AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth),
-        AgentChoice::Omp => render_omp_extension(&server_url, auth),
+        AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth, strategy),
+        AgentChoice::Omp => render_omp_extension(&server_url, auth, strategy),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
             render_claude_code(&hooks_dir, &server_url, auth, &config.data_dir, strategy)
@@ -969,7 +969,8 @@ fn apply_to_opencode_plugin(
         Some(p) => p.clone(),
         None => opencode_plugin_path()?,
     };
-    let body = build_opencode_plugin(server_url, auth_token);
+    let strategy = args.project_strategy.baked();
+    let body = build_opencode_plugin(server_url, auth_token, strategy);
 
     let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
     println!(
@@ -991,19 +992,94 @@ fn apply_to_opencode_plugin(
     Ok(())
 }
 
-fn render_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> Result<()> {
+fn render_opencode_plugin(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<()> {
     println!("// OpenCode plugin — write to ~/.config/opencode/plugins/ai-memory.ts");
     println!("// Or re-run with `--apply` to install it automatically.");
     println!("// Restart OpenCode after changing plugins; config is loaded at startup.");
     println!();
-    println!("{}", build_opencode_plugin(server_url, auth_token));
+    println!(
+        "{}",
+        build_opencode_plugin(server_url, auth_token, project_strategy)
+    );
     Ok(())
 }
 
-fn build_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> String {
+/// Emit the `applyMarkerParams` TypeScript function shared verbatim by the
+/// OpenCode plugin and the OMP extension.
+///
+/// `None` reproduces the historical marker-only function byte-for-byte, so
+/// existing generated files and golden tests are unchanged. `Some(default)`
+/// prepends a `DEFAULT_PROJECT_STRATEGY` const and emits a variant that applies
+/// that install-time default when no marker pins a `project_strategy` (#128).
+/// A marker's own `project` / `project_strategy` still take precedence (§3.3),
+/// and repo-root is resolved host-side via `repoRootProject`.
+fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
+    let Some(default) = default_strategy else {
+        return r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  const marker = findMarker(cwd);
+  if (!marker || !cwd) return;
+  url.searchParams.set("cwd", cwd);
+  try {
+    const body = readFileSync(marker, "utf8");
+    const workspace = tomlKey(body, "workspace");
+    const project = tomlKey(body, "project");
+    const projectStrategy = tomlKey(body, "project_strategy");
+    if (workspace) url.searchParams.set("workspace", workspace);
+    if (project) url.searchParams.set("project", project);
+    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+      const repoProject = repoRootProject(cwd);
+      if (repoProject) url.searchParams.set("project", repoProject);
+    }
+  } catch (_e) {
+  }
+}"#
+        .to_string();
+    };
+    let body = r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  if (!cwd) return;
+  url.searchParams.set("cwd", cwd);
+  let workspace: string | undefined;
+  let project: string | undefined;
+  let projectStrategy: string | undefined;
+  const marker = findMarker(cwd);
+  if (marker) {
+    try {
+      const body = readFileSync(marker, "utf8");
+      workspace = tomlKey(body, "workspace");
+      project = tomlKey(body, "project");
+      projectStrategy = tomlKey(body, "project_strategy");
+    } catch (_e) {
+    }
+  }
+  if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;
+  if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+    const repoProject = repoRootProject(cwd);
+    if (repoProject) project = repoProject;
+  }
+  if (workspace) url.searchParams.set("workspace", workspace);
+  if (project) url.searchParams.set("project", project);
+  if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+}"#;
+    format!(
+        "const DEFAULT_PROJECT_STRATEGY = {};\n{body}",
+        ts_string_literal(default)
+    )
+}
+
+fn build_opencode_plugin(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
     let token_line = auth_token
         .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
         .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    let apply_marker_params = ts_apply_marker_params(project_strategy);
     format!(
         r#"// Auto-generated by `ai-memory install-hooks --agent opencode --apply`.
 // Edit by re-running the command, not by hand — install-hooks
@@ -1073,25 +1149,7 @@ function repoRootProject(cwd: string | undefined): string | undefined {{
     return undefined;
   }}
 }}
-function applyMarkerParams(url: URL, cwd: string | undefined): void {{
-  const marker = findMarker(cwd);
-  if (!marker || !cwd) return;
-  url.searchParams.set("cwd", cwd);
-  try {{
-    const body = readFileSync(marker, "utf8");
-    const workspace = tomlKey(body, "workspace");
-    const project = tomlKey(body, "project");
-    const projectStrategy = tomlKey(body, "project_strategy");
-    if (workspace) url.searchParams.set("workspace", workspace);
-    if (project) url.searchParams.set("project", project);
-    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
-    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {{
-      const repoProject = repoRootProject(cwd);
-      if (repoProject) url.searchParams.set("project", repoProject);
-    }}
-  }} catch (_e) {{
-  }}
-}}
+{apply_marker_params}
 
 function sessionID(input: unknown): string | undefined {{
   const value = input as any;
@@ -1271,7 +1329,8 @@ fn apply_to_omp_extension(
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = resolve_omp_extension_path(args)?;
-    let body = build_omp_extension(server_url, auth_token);
+    let strategy = args.project_strategy.baked();
+    let body = build_omp_extension(server_url, auth_token, strategy);
 
     let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
     println!(
@@ -1295,12 +1354,19 @@ fn apply_to_omp_extension(
     Ok(())
 }
 
-fn render_omp_extension(server_url: &str, auth_token: Option<&str>) -> Result<()> {
+fn render_omp_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<()> {
     println!("// Oh My Pi / OMP extension — write to ~/.omp/agent/extensions/ai-memory.ts");
     println!("// Or re-run with `--apply` to install it automatically.");
     println!("// Restart OMP after changing extensions; config is loaded at startup.");
     println!();
-    println!("{}", build_omp_extension(server_url, auth_token));
+    println!(
+        "{}",
+        build_omp_extension(server_url, auth_token, project_strategy)
+    );
     Ok(())
 }
 
@@ -1311,10 +1377,15 @@ fn resolve_omp_extension_path(args: &InstallHooksArgs) -> Result<PathBuf> {
     omp_extension_path()
 }
 
-fn build_omp_extension(server_url: &str, auth_token: Option<&str>) -> String {
+fn build_omp_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
     let token_line = auth_token
         .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
         .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    let apply_marker_params = ts_apply_marker_params(project_strategy);
     format!(
         r#"// Auto-generated by `ai-memory install-hooks --agent omp --apply`.
 // Edit by re-running the command, not by hand — install-hooks
@@ -1383,25 +1454,7 @@ function repoRootProject(cwd: string | undefined): string | undefined {{
     return undefined;
   }}
 }}
-function applyMarkerParams(url: URL, cwd: string | undefined): void {{
-  const marker = findMarker(cwd);
-  if (!marker || !cwd) return;
-  url.searchParams.set("cwd", cwd);
-  try {{
-    const body = readFileSync(marker, "utf8");
-    const workspace = tomlKey(body, "workspace");
-    const project = tomlKey(body, "project");
-    const projectStrategy = tomlKey(body, "project_strategy");
-    if (workspace) url.searchParams.set("workspace", workspace);
-    if (project) url.searchParams.set("project", project);
-    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
-    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {{
-      const repoProject = repoRootProject(cwd);
-      if (repoProject) url.searchParams.set("project", repoProject);
-    }}
-  }} catch (_e) {{
-  }}
-}}
+{apply_marker_params}
 
 function sessionID(ctx: any): string | undefined {{
   const id = ctx?.sessionManager?.getSessionId?.();
@@ -2638,7 +2691,7 @@ model = "gpt-5"
 
     #[test]
     fn opencode_plugin_uses_real_plugin_hooks() {
-        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"));
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"), None);
 
         assert!(plugin.contains("event: async (input)"));
         assert!(plugin.contains(r#""chat.message": async"#));
@@ -2680,7 +2733,7 @@ model = "gpt-5"
 
     #[test]
     fn opencode_plugin_normalizes_payloads_without_legacy_wrapper() {
-        let plugin = build_opencode_plugin("http://127.0.0.1:49374/", None);
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374/", None, None);
 
         assert!(plugin.contains("const SERVER = \"http://127.0.0.1:49374/\".replace"));
         assert!(plugin.contains("const TOKEN: string | null = null;"));
@@ -2701,7 +2754,7 @@ model = "gpt-5"
 
     #[test]
     fn omp_extension_uses_native_lifecycle_events() {
-        let extension = build_omp_extension("http://127.0.0.1:49374", Some("tok"));
+        let extension = build_omp_extension("http://127.0.0.1:49374", Some("tok"), None);
 
         assert!(extension.contains("export default function AiMemoryExtension"));
         assert!(extension.contains("const AGENT = \"omp\";"));
