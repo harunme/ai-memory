@@ -9,13 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The native `session-end` hook now emits a one-line stderr note when the spool
-  flush leaves a backlog queued (the heavy-session condition where the budget
-  elapses before the spool drains): it reports how many events were flushed and
-  how many were deferred to the next boundary, confirms no data is lost, and
-  names the two knobs to bound the backlog (`AI_MEMORY_HOOK_END_BUDGET_MINUTES`,
-  `AI_MEMORY_HOOK_INCREMENTAL_THRESHOLD`), turning an otherwise silent, scary
-  cancelled-hook symptom into an actionable, self-documenting message. A
-  fully-drained session stays silent. (#130)
+  drain leaves events queued for a later boundary: it reports how many events
+  were flushed, how many remain queued, whether any events were dropped as
+  undeliverable, and names the knobs to bound the backlog
+  (`AI_MEMORY_HOOK_END_BUDGET_MINUTES`, `AI_MEMORY_HOOK_INCREMENTAL_THRESHOLD`),
+  turning an otherwise silent, scary cancelled-hook symptom into an actionable,
+  self-documenting message. A fully-drained session stays silent. (#130)
 
 ## [1.3.0] - 2026-06-24
 

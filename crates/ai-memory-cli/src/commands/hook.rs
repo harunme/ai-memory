@@ -105,25 +105,36 @@ fn should_incremental_drain(event: &str, spool_len: usize, threshold: usize) -> 
     event == "post-tool-use" && spool_len >= threshold
 }
 
-/// When the `session-end` flush leaves events queued, meaning the budget elapsed
-/// before the spool backlog cleared (the heavy-session condition in issue #130),
-/// return a concise, actionable note. `None` when nothing was deferred, so a normal
+/// When the `session-end` drain cannot clear the spool, return a concise,
+/// actionable note. `None` when nothing remains queued or dropped, so a normal
 /// session stays silent. The caller writes this to **stderr** (never stdout,
 /// which carries the hook's JSON protocol): mirroring the spool's at-capacity
 /// warning, an expected-but-noteworthy backlog is surfaced rather than left
 /// silent, and the message names the two knobs the operator can turn instead of
 /// the bare, scary cancelled-hook symptom.
 fn session_end_deferred_note(result: &hook_spool::DrainResult) -> Option<String> {
-    if result.remaining == 0 {
+    if result.remaining == 0 && result.dropped == 0 {
         return None;
     }
-    Some(format!(
-        "ai-memory: session-end flushed {} event(s); {} deferred to the next \
-         session boundary (the spool backlog exceeded the flush budget; no data \
-         is lost, they drain on a later boundary). Raise {END_BUDGET_ENV} (whole \
-         minutes) or lower {INCREMENTAL_THRESHOLD_ENV} to keep the backlog bounded.",
+
+    let mut note = format!(
+        "ai-memory: session-end flushed {} event(s); {} still queued for a later \
+         session boundary.",
         result.sent, result.remaining,
-    ))
+    );
+    if result.dropped > 0 {
+        note.push_str(&format!(
+            " {} event(s) were dropped as undeliverable after exhausting the retry budget.",
+            result.dropped,
+        ));
+    } else {
+        note.push_str(" No queued data was lost.");
+    }
+    note.push_str(&format!(
+        " Raise {END_BUDGET_ENV} (whole minutes), lower {INCREMENTAL_THRESHOLD_ENV}, \
+         or check server reachability to keep the backlog bounded."
+    ));
+    Some(note)
 }
 
 fn env_lookup(name: &str) -> Option<String> {
@@ -340,9 +351,9 @@ mod tests {
 
     #[test]
     fn session_end_note_reports_deferred_backlog_and_knobs() {
-        // The heavy-session condition from issue #130: a budget-bounded flush
-        // delivers some events and defers the rest. The note must report both
-        // counts and name the two knobs the issue's own workaround used.
+        // The heavy-session condition from issue #130: a boundary drain
+        // delivers some events and leaves the rest queued. The note must report
+        // both counts and name the two knobs the issue's own workaround used.
         let backlog = hook_spool::DrainResult {
             sent: 500,
             remaining: 1384,
@@ -359,6 +370,24 @@ mod tests {
             note.contains(INCREMENTAL_THRESHOLD_ENV),
             "points at the mid-session threshold knob"
         );
+        assert!(note.contains("No queued data was lost"));
+    }
+
+    #[test]
+    fn session_end_note_reports_dropped_events_without_promising_no_loss() {
+        let result = hook_spool::DrainResult {
+            sent: 4,
+            remaining: 2,
+            dropped: 1,
+        };
+
+        let note = session_end_deferred_note(&result).expect("drops must produce a note");
+
+        assert!(note.contains("4"), "reports delivered count");
+        assert!(note.contains("2"), "reports queued count");
+        assert!(note.contains("1"), "reports dropped count");
+        assert!(note.contains("dropped as undeliverable"));
+        assert!(!note.contains("No queued data was lost"));
     }
 
     #[test]
