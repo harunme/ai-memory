@@ -36,7 +36,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::{AgentChoice, SetupAgentArgs};
 use crate::commands::render_shared::{
-    CLAUDE_CODE_EVENTS, build_claude_code_payload, build_grok_payload,
+    ANTIGRAVITY_LIFECYCLE_EVENTS, ANTIGRAVITY_TOOL_EVENTS, CODEX_PROFILE, CURSOR_PROFILE,
+    GEMINI_PROFILE, build_claude_code_payload, build_grok_payload,
     hook_script_for_current_platform,
 };
 use crate::config::{Config, DEFAULT_SERVER_URL};
@@ -130,12 +131,17 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
     match args.agent {
         AgentChoice::ClaudeCode => emit_claude_code(&emit_root, &args)?,
         AgentChoice::Grok => emit_grok(&emit_root, &args)?,
-        AgentChoice::Codex
-        | AgentChoice::Cursor
-        | AgentChoice::GeminiCli
-        | AgentChoice::AntigravityCli => {
-            emit_other(&emit_root, agent_sub, &args);
+        AgentChoice::Codex => emit_other(&emit_root, agent_sub, &args, &[CODEX_PROFILE.events]),
+        AgentChoice::Cursor => emit_other(&emit_root, agent_sub, &args, &[CURSOR_PROFILE.events]),
+        AgentChoice::GeminiCli => {
+            emit_other(&emit_root, agent_sub, &args, &[GEMINI_PROFILE.events]);
         }
+        AgentChoice::AntigravityCli => emit_other(
+            &emit_root,
+            agent_sub,
+            &args,
+            &[&ANTIGRAVITY_TOOL_EVENTS, &ANTIGRAVITY_LIFECYCLE_EVENTS],
+        ),
         AgentChoice::OpenCode => unreachable!("opencode handled above"),
         AgentChoice::Omp => unreachable!("omp handled above"),
         AgentChoice::Openclaw => {
@@ -226,7 +232,12 @@ fn emit_grok(emit_root: &Path, args: &SetupAgentArgs) -> Result<()> {
     Ok(())
 }
 
-fn emit_other(emit_root: &Path, label: &str, args: &SetupAgentArgs) {
+fn emit_other(
+    emit_root: &Path,
+    label: &str,
+    args: &SetupAgentArgs,
+    event_lists: &[&[(&str, &str)]],
+) {
     // These clients have hook surfaces, but their print-mode config
     // snippets are intentionally conservative: apply-mode owns the
     // exact merge/plugin generation where ai-memory knows the format.
@@ -238,13 +249,23 @@ fn emit_other(emit_root: &Path, label: &str, args: &SetupAgentArgs) {
         println!("#       value you passed via --auth-token (not echoed).");
     }
     println!();
-    for (_, script) in CLAUDE_CODE_EVENTS {
-        let script = hook_script_for_current_platform(script);
-        println!("- {}", emit_root.join(script.as_ref()).display());
+    for path in event_script_paths(emit_root, event_lists) {
+        println!("- {}", path.display());
     }
     println!();
     println!("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.");
     println!("Also run `ai-memory install-mcp --client {label}` to wire MCP separately.");
+}
+
+fn event_script_paths(emit_root: &Path, event_lists: &[&[(&str, &str)]]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for events in event_lists {
+        for (_, script) in *events {
+            let script = hook_script_for_current_platform(script);
+            paths.push(emit_root.join(script.as_ref()));
+        }
+    }
+    paths
 }
 
 fn is_hook_script_file(path: &Path) -> bool {
@@ -378,5 +399,30 @@ mod tests {
     fn source_candidates_honour_explicit_override() {
         let candidates = source_candidates(Some(Path::new("/custom/src")), "codex", None);
         assert_eq!(candidates, vec![PathBuf::from("/custom/src/codex")]);
+    }
+
+    #[test]
+    fn manual_script_paths_use_agent_specific_events() {
+        let root = Path::new("/hooks/gemini-cli");
+        let paths = event_script_paths(root, &[GEMINI_PROFILE.events]);
+        let rendered = paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("session-start"));
+        assert!(rendered.contains("session-end"));
+        assert!(rendered.contains("pre-tool-use"));
+        assert!(rendered.contains("post-tool-use"));
+        assert!(rendered.contains("pre-compact"));
+        assert!(
+            !rendered.contains("user-prompt-submit"),
+            "Gemini has no UserPromptSubmit hook; setup-agent must not print Claude-only scripts"
+        );
+        assert!(
+            !rendered.contains("subagent-start") && !rendered.contains("subagent-stop"),
+            "Gemini has no subagent hook events; setup-agent must not print nonexistent scripts"
+        );
     }
 }

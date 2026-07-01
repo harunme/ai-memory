@@ -205,9 +205,10 @@ pub enum BatchOutcome {
     /// the server stopped on that item (fail-fast) — the caller deletes the
     /// prefix and charges the next item a retry.
     Accepted(usize),
-    /// `429` — ingest saturated; nothing was processed. Keep the whole batch and
-    /// retry it later WITHOUT bumping attempts (saturation isn't a failure).
-    Saturated,
+    /// `429` — ingest saturated after committing this many leading items. The
+    /// caller deletes that prefix and retries the rest later WITHOUT bumping
+    /// attempts (saturation isn't a failure).
+    Saturated(usize),
     /// `404`/`405` — the server has no `/hook/batch` (a pre-upgrade build). The
     /// caller falls back to per-event `POST /hook` for the rest of the drain.
     Unsupported,
@@ -252,7 +253,13 @@ pub async fn post_batch(
                     Err(_) => BatchOutcome::Failed,
                 }
             } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                BatchOutcome::Saturated
+                let accepted = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("accepted").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(0) as usize;
+                BatchOutcome::Saturated(accepted)
             } else if status == reqwest::StatusCode::NOT_FOUND
                 || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
             {

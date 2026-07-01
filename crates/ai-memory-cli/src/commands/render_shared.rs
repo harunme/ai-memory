@@ -4,9 +4,11 @@
 //! `setup-agent`) all emit configuration snippets that share two
 //! pieces of state:
 //!
-//! 1. The Claude Code lifecycle-hook events ai-memory wires up
-//!    (see `CLAUDE_CODE_EVENTS`) — kept in sync between hook-bundle
-//!    generation (setup-agent) and JSON-config rendering (install-hooks).
+//! 1. The per-agent lifecycle-hook event lists ai-memory wires up
+//!    (Claude/Grok share `CLAUDE_CODE_EVENTS`; Codex, Cursor, Gemini,
+//!    and Antigravity define their own profiles) — kept in sync between
+//!    hook-bundle generation (setup-agent) and config rendering
+//!    (install-hooks).
 //! 2. The optional `Authorization: Bearer <token>` header used by
 //!    both MCP client configs (install-mcp) and hook env blocks
 //!    (install-hooks / setup-agent).
@@ -26,10 +28,10 @@ use crate::commands::path_util::strip_windows_verbatim_prefix;
 /// Claude Code lifecycle events ai-memory hooks. Each pair is
 /// `(event-name-in-Claude-Code-settings, POSIX hook-script-filename)`.
 ///
-/// Adding a hook event means updating this list AND adding the
-/// matching `.sh` and `.ps1` files under
-/// `hooks/{claude-code,codex,cursor,gemini-cli,grok,opencode}/`. The
-/// install-hooks parity test fails if the bundle drifts.
+/// Adding a hook event means updating this list AND adding the matching `.sh`
+/// and `.ps1` files under the agents that use this profile (`claude-code` and
+/// `grok`). Agents with different vocabularies keep their own event arrays
+/// below. The install-hooks parity test fails if a bundle drifts.
 pub(crate) const CLAUDE_CODE_EVENTS: [(&str, &str); 9] = [
     ("SessionStart", "session-start.sh"),
     ("UserPromptSubmit", "user-prompt-submit.sh"),

@@ -25,7 +25,8 @@ use crate::commands::install_mcp;
 use crate::commands::openclaw_plugin;
 use crate::commands::path_util::home_dir;
 use crate::commands::render_shared::{
-    CURSOR_PROFILE, GEMINI_PROFILE, build_antigravity_payload_with_data_dir,
+    ANTIGRAVITY_LIFECYCLE_EVENTS, ANTIGRAVITY_TOOL_EVENTS, CODEX_PROFILE, CURSOR_PROFILE,
+    GEMINI_PROFILE, build_antigravity_payload_with_data_dir,
     build_claude_code_payload_with_data_dir, build_grok_payload_with_data_dir,
     build_profile_payload_for_agent, hook_script_for_claude_code, hook_script_for_current_platform,
     ts_string_literal,
@@ -184,19 +185,47 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("codex", &hooks_dir, &server_url, auth, strategy)
+            render_agent(
+                "codex",
+                &hooks_dir,
+                &server_url,
+                auth,
+                strategy,
+                &[CODEX_PROFILE.events],
+            )
         }
         AgentChoice::Cursor => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("cursor", &hooks_dir, &server_url, auth, strategy)
+            render_agent(
+                "cursor",
+                &hooks_dir,
+                &server_url,
+                auth,
+                strategy,
+                &[CURSOR_PROFILE.events],
+            )
         }
         AgentChoice::GeminiCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("gemini-cli", &hooks_dir, &server_url, auth, strategy)
+            render_agent(
+                "gemini-cli",
+                &hooks_dir,
+                &server_url,
+                auth,
+                strategy,
+                &[GEMINI_PROFILE.events],
+            )
         }
         AgentChoice::AntigravityCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("antigravity-cli", &hooks_dir, &server_url, auth, strategy)
+            render_agent(
+                "antigravity-cli",
+                &hooks_dir,
+                &server_url,
+                auth,
+                strategy,
+                &[&ANTIGRAVITY_TOOL_EVENTS, &ANTIGRAVITY_LIFECYCLE_EVENTS],
+            )
         }
         AgentChoice::Grok => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -1029,9 +1058,11 @@ fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
     const workspace = tomlKey(body, "workspace");
     const project = tomlKey(body, "project");
     const projectStrategy = tomlKey(body, "project_strategy");
+    const dropSubagent = tomlKey(body, "drop_subagent_captures");
     if (workspace) url.searchParams.set("workspace", workspace);
     if (project) url.searchParams.set("project", project);
     if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+    if (dropSubagent) url.searchParams.set("drop_subagent", dropSubagent);
     if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
       const repoProject = repoRootProject(cwd);
       if (repoProject) url.searchParams.set("project", repoProject);
@@ -1047,6 +1078,7 @@ fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
   let workspace: string | undefined;
   let project: string | undefined;
   let projectStrategy: string | undefined;
+  let dropSubagent: string | undefined;
   const marker = findMarker(cwd);
   if (marker) {
     try {
@@ -1054,6 +1086,7 @@ fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
       workspace = tomlKey(body, "workspace");
       project = tomlKey(body, "project");
       projectStrategy = tomlKey(body, "project_strategy");
+      dropSubagent = tomlKey(body, "drop_subagent_captures");
     } catch (_e) {
     }
   }
@@ -1065,6 +1098,7 @@ fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
   if (workspace) url.searchParams.set("workspace", workspace);
   if (project) url.searchParams.set("project", project);
   if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+  if (dropSubagent) url.searchParams.set("drop_subagent", dropSubagent);
 }"#;
     format!(
         "const DEFAULT_PROJECT_STRATEGY = {};\n{body}",
@@ -1636,10 +1670,18 @@ fn render_agent(
     server_url: &str,
     auth_token: Option<&str>,
     project_strategy: Option<&str>,
+    event_lists: &[&[(&str, &str)]],
 ) -> Result<()> {
     print!(
         "{}",
-        render_agent_output(label, hooks_dir, server_url, auth_token, project_strategy)?
+        render_agent_output(
+            label,
+            hooks_dir,
+            server_url,
+            auth_token,
+            project_strategy,
+            event_lists,
+        )
     );
     Ok(())
 }
@@ -1650,7 +1692,8 @@ fn render_agent_output(
     server_url: &str,
     auth_token: Option<&str>,
     project_strategy: Option<&str>,
-) -> Result<String> {
+    event_lists: &[&[(&str, &str)]],
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "# {label} hook scripts (manual install — wire each to the matching event)\n"
@@ -1666,11 +1709,13 @@ fn render_agent_output(
         out.push_str("#       --auth-token here AND set AI_MEMORY_AUTH_TOKEN on the server.\n");
     }
     out.push('\n');
-    for entry in std::fs::read_dir(hooks_dir)? {
-        let entry = entry?;
-        let p = entry.path();
-        if p.is_file() && p.extension().is_some_and(|e| e == hook_script_extension()) {
-            out.push_str(&format!("- {}\n", p.display()));
+    for events in event_lists {
+        for (_, script) in *events {
+            let script = hook_script_for_current_platform(script);
+            out.push_str(&format!(
+                "- {}\n",
+                hooks_dir.join(script.as_ref()).display()
+            ));
         }
     }
     out.push('\n');
@@ -1679,7 +1724,7 @@ fn render_agent_output(
         out.push_str(&instruction);
         out.push('\n');
     }
-    Ok(out)
+    out
 }
 
 fn manual_agent_project_strategy_instruction(project_strategy: Option<&str>) -> Option<String> {
@@ -1875,14 +1920,6 @@ fn staged_command_dir(staged: &Path, agent_label: &str) -> PathBuf {
     match std::env::var("AI_MEMORY_HOOKS_HOST_ROOT") {
         Ok(root) if !root.trim().is_empty() => PathBuf::from(root).join(agent_label),
         _ => staged.to_path_buf(),
-    }
-}
-
-fn hook_script_extension() -> &'static str {
-    if hook_script_for_current_platform("x.sh").ends_with(".ps1") {
-        "ps1"
-    } else {
-        "sh"
     }
 }
 
@@ -2269,8 +2306,8 @@ mod tests {
                 "http://127.0.0.1:49374",
                 None,
                 Some("repo-root"),
-            )
-            .unwrap_or_else(|err| panic!("failed to render {agent}: {err}"));
+                &[CODEX_PROFILE.events],
+            );
             assert!(
                 output.contains("AI_MEMORY_PROJECT_STRATEGY=repo-root"),
                 "{agent} manual output must tell users to set the strategy env: {output}"
@@ -2282,10 +2319,62 @@ mod tests {
     fn manual_agent_render_omits_project_strategy_by_default() {
         let temp = TempDir::new().unwrap();
         stub_scripts(temp.path(), &["session-start.sh"]);
-        let output =
-            render_agent_output("codex", temp.path(), "http://127.0.0.1:49374", None, None)
-                .unwrap();
+        let output = render_agent_output(
+            "codex",
+            temp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            None,
+            &[CODEX_PROFILE.events],
+        );
         assert!(!output.contains("AI_MEMORY_PROJECT_STRATEGY"));
+    }
+
+    #[test]
+    fn manual_agent_render_uses_agent_profile_not_physical_bundle_listing() {
+        let temp = TempDir::new().unwrap();
+        stub_scripts(
+            temp.path(),
+            &[
+                "session-start.sh",
+                "session-end.sh",
+                "user-prompt-submit.sh",
+                "stop.sh",
+                "subagent-start.sh",
+                "subagent-stop.sh",
+            ],
+        );
+
+        let gemini = render_agent_output(
+            "gemini-cli",
+            temp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            None,
+            &[GEMINI_PROFILE.events],
+        );
+        assert!(gemini.contains("session-start"));
+        assert!(gemini.contains("session-end"));
+        assert!(
+            !gemini.contains("user-prompt-submit")
+                && !gemini.contains("subagent-start")
+                && !gemini.contains("subagent-stop"),
+            "Gemini manual output must omit scripts outside Gemini's hook vocabulary: {gemini}"
+        );
+
+        let codex = render_agent_output(
+            "codex",
+            temp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            None,
+            &[CODEX_PROFILE.events],
+        );
+        assert!(codex.contains("stop"));
+        assert!(
+            !codex.contains("session-end") && !codex.contains("subagent-start"),
+            "Codex manual output must omit scripts outside Codex's hook vocabulary: {codex}"
+        );
     }
 
     #[test]
@@ -2499,6 +2588,7 @@ model = "gpt-5"
             "codex",
             "cursor",
             "gemini-cli",
+            "grok",
             "opencode",
             "antigravity-cli",
         ] {
@@ -2796,7 +2886,9 @@ model = "gpt-5"
         assert!(plugin.contains("readFileSync(marker, \"utf8\")"));
         assert!(plugin.contains("text.split(/\\r?\\n/)"));
         assert!(plugin.contains("tomlKey(body, \"project_strategy\")"));
+        assert!(plugin.contains("tomlKey(body, \"drop_subagent_captures\")"));
         assert!(plugin.contains("url.searchParams.set(\"project_strategy\", projectStrategy)"));
+        assert!(plugin.contains("url.searchParams.set(\"drop_subagent\", dropSubagent)"));
         assert!(plugin.contains(
             "applyMarkerParams(url, typeof payload.cwd === \"string\" ? payload.cwd : undefined);"
         ));
@@ -2887,7 +2979,9 @@ model = "gpt-5"
         assert!(extension.contains("readFileSync(marker, \"utf8\")"));
         assert!(extension.contains("text.split(/\\r?\\n/)"));
         assert!(extension.contains("tomlKey(body, \"project_strategy\")"));
+        assert!(extension.contains("tomlKey(body, \"drop_subagent_captures\")"));
         assert!(extension.contains("url.searchParams.set(\"project_strategy\", projectStrategy)"));
+        assert!(extension.contains("url.searchParams.set(\"drop_subagent\", dropSubagent)"));
         assert!(extension.contains(
             "applyMarkerParams(url, typeof payload.cwd === \"string\" ? payload.cwd : undefined);"
         ));

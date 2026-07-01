@@ -195,9 +195,10 @@ pub struct DrainResult {
 /// drain transparently falls back to per-event `POST /hook`.
 ///
 /// A delivered event is deleted; a failed one is charged a retry attempt
-/// (dropped at `MAX_ATTEMPTS`); a `429` (saturation) is retried untouched so it
-/// never burns the retry budget. OIDC bearer is resolved + refreshed at most
-/// once per drain and cached.
+/// (dropped at `MAX_ATTEMPTS`); a `429` (saturation) deletes any accepted prefix
+/// the server reports, then retries the rest untouched so it never burns the
+/// retry budget. OIDC bearer is resolved + refreshed at most once per drain and
+/// cached.
 ///
 /// Best-effort: returns counts and never errors, so a session boundary is never
 /// blocked beyond the budget and never fails the agent.
@@ -307,10 +308,18 @@ pub async fn drain(
                         break;
                     }
                 }
-                BatchOutcome::Saturated => {
-                    // Server ingest is full; further batches would 429 too. Leave
-                    // everything queued, no attempt bump (parity with per-event).
-                    result.remaining += chunk.len() + files.len().saturating_sub(idx);
+                BatchOutcome::Saturated(k) => {
+                    // Server ingest filled after committing a leading prefix.
+                    // Delete only that prefix; leave the saturated item and all
+                    // later entries queued without bumping attempts (parity with
+                    // per-event 429 handling).
+                    let k = k.min(chunk.len());
+                    for (path, _) in &chunk[..k] {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    result.sent += k;
+                    result.remaining +=
+                        chunk.len().saturating_sub(k) + files.len().saturating_sub(idx);
                     break;
                 }
                 BatchOutcome::Unsupported => {
@@ -806,6 +815,46 @@ mod tests {
         let loaded: SpoolEntry =
             serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
         assert_eq!(loaded.attempts, 0, "429 must not consume the retry budget");
+    }
+
+    #[tokio::test]
+    async fn partial_429_deletes_prefix_without_bumping_saturated_item() {
+        let req_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let addr =
+            serve_counting_hook_with_accept(req_count.clone(), "429 Too Many Requests", Some(1))
+                .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        for i in 0..3 {
+            write_spool_entry(
+                &spool,
+                &format!("evt-{i}.json"),
+                format!("http://{addr}/hook?event=e{i}"),
+            );
+        }
+
+        let r = drain(
+            &spool,
+            tmp.path(),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert_eq!(r.sent, 1);
+        assert_eq!(r.dropped, 0);
+        assert_eq!(r.remaining, 2);
+        assert_eq!(req_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut files = list_entries(&spool).unwrap();
+        files.sort();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("evt-1.json"));
+        assert!(files[1].ends_with("evt-2.json"));
+        assert_eq!(
+            sorted_attempts(&spool),
+            vec![0, 0],
+            "saturation must not bump retry attempts for the first unaccepted item"
+        );
     }
 
     /// A mock hook server: answers `200 {"accepted":N}` to `POST /hook/batch`

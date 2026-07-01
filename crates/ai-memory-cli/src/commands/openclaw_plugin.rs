@@ -213,9 +213,11 @@ fn apply_marker_params_ts(default_strategy: Option<&str>) -> String {
     const workspace = tomlKey(body, "workspace");
     const project = tomlKey(body, "project");
     const projectStrategy = tomlKey(body, "project_strategy");
+    const dropSubagent = tomlKey(body, "drop_subagent_captures");
     if (workspace) url.searchParams.set("workspace", workspace);
     if (project) url.searchParams.set("project", project);
     if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+    if (dropSubagent) url.searchParams.set("drop_subagent", dropSubagent);
     if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
       const repoProject = repoRootProject(cwd);
       if (repoProject) url.searchParams.set("project", repoProject);
@@ -231,6 +233,7 @@ fn apply_marker_params_ts(default_strategy: Option<&str>) -> String {
   let workspace: string | undefined;
   let project: string | undefined;
   let projectStrategy: string | undefined;
+  let dropSubagent: string | undefined;
   const marker = findMarker(cwd);
   if (marker) {
     try {
@@ -238,6 +241,7 @@ fn apply_marker_params_ts(default_strategy: Option<&str>) -> String {
       workspace = tomlKey(body, "workspace");
       project = tomlKey(body, "project");
       projectStrategy = tomlKey(body, "project_strategy");
+      dropSubagent = tomlKey(body, "drop_subagent_captures");
     } catch (_e) {
     }
   }
@@ -249,6 +253,7 @@ fn apply_marker_params_ts(default_strategy: Option<&str>) -> String {
   if (workspace) url.searchParams.set("workspace", workspace);
   if (project) url.searchParams.set("project", project);
   if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+  if (dropSubagent) url.searchParams.set("drop_subagent", dropSubagent);
 }"#;
     format!(
         "const DEFAULT_PROJECT_STRATEGY = {};\n{body}",
@@ -521,6 +526,8 @@ mod tests {
         assert!(plugin.contains("postHook(\"user-prompt\""));
         assert!(plugin.contains("function applyMarkerParams"));
         assert!(plugin.contains("tomlKey(body, \"project_strategy\")"));
+        assert!(plugin.contains("tomlKey(body, \"drop_subagent_captures\")"));
+        assert!(plugin.contains("url.searchParams.set(\"drop_subagent\", dropSubagent)"));
         assert!(plugin.contains("import { execFileSync } from \"node:child_process\";"));
         assert!(plugin.contains("import { basename, dirname, join, resolve } from \"node:path\";"));
         assert!(plugin.contains("function repoRootProject"));
