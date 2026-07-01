@@ -1606,12 +1606,12 @@ mod tests {
             .get_or_create_workspace(String::from(DEFAULT_WORKSPACE_NAME))
             .await
             .unwrap();
-        // Three poison rows that would each match too broadly without
-        // the safety filters.
+        // Poison rows that would match too broadly without the safety filters.
+        // New trailing-slash repo paths are normalized at the store write
+        // boundary; legacy raw trailing separators are covered in store tests.
         for (name, repo) in [
             ("empty-repo", String::new()),
             ("root-repo", String::from("/")),
-            ("trailing-repo", String::from("/repo/foo/")),
         ] {
             state
                 .writer
@@ -1620,7 +1620,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Resolve a cwd that the three poison rows would each match
+        // Resolve a cwd that the poison rows would each match
         // pre-fix. Expect: a NEW project created by basename.
         let (resolved_ws, resolved) = resolve_project_ids(
             &state,

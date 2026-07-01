@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{IndexAddOption, ObjectType, Repository, Signature};
+use git2::{ErrorCode, IndexAddOption, ObjectType, Repository, Signature};
 use tracing::{debug, warn};
 
 use crate::error::{WikiError, WikiResult};
@@ -33,6 +33,11 @@ pub struct Checkpoint {
     pub summary: String,
     /// Author timestamp, seconds since Unix epoch.
     pub time: i64,
+}
+
+enum CommitGit2Error {
+    Open(git2::Error),
+    Other(git2::Error),
 }
 
 impl GitAdapter {
@@ -70,22 +75,25 @@ impl GitAdapter {
     pub fn commit_all(&self, message: &str) -> WikiResult<Option<git2::Oid>> {
         match self.commit_all_git2(message) {
             Ok(result) => Ok(result),
-            Err(e) => commit_all_fallback(&self.root, message, e),
+            Err(CommitGit2Error::Open(e)) if should_try_commit_cli_fallback(&e) => {
+                commit_all_fallback(&self.root, message, e)
+            }
+            Err(CommitGit2Error::Open(e) | CommitGit2Error::Other(e)) => Err(map_git_err(e)),
         }
     }
 
-    fn commit_all_git2(&self, message: &str) -> WikiResult<Option<git2::Oid>> {
-        let repo = Repository::open(&self.root).map_err(map_git_err)?;
+    fn commit_all_git2(&self, message: &str) -> Result<Option<git2::Oid>, CommitGit2Error> {
+        let repo = Repository::open(&self.root).map_err(CommitGit2Error::Open)?;
 
         // Stage everything (including deletions).
-        let mut index = repo.index().map_err(map_git_err)?;
+        let mut index = repo.index().map_err(CommitGit2Error::Other)?;
         index
             .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
-            .map_err(map_git_err)?;
-        index.write().map_err(map_git_err)?;
+            .map_err(CommitGit2Error::Other)?;
+        index.write().map_err(CommitGit2Error::Other)?;
 
         // If the index matches HEAD, there is nothing to commit.
-        let tree_oid = index.write_tree().map_err(map_git_err)?;
+        let tree_oid = index.write_tree().map_err(CommitGit2Error::Other)?;
         if let Ok(head) = repo.head()
             && let Some(target) = head.target()
             && let Ok(parent_commit) = repo.find_commit(target)
@@ -102,12 +110,13 @@ impl GitAdapter {
             debug!("fresh repo, empty index; no commit");
             return Ok(None);
         }
-        let tree = repo.find_tree(tree_oid).map_err(map_git_err)?;
-        let sig = Signature::now(COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL).map_err(map_git_err)?;
+        let tree = repo.find_tree(tree_oid).map_err(CommitGit2Error::Other)?;
+        let sig = Signature::now(COMMIT_AUTHOR_NAME, COMMIT_AUTHOR_EMAIL)
+            .map_err(CommitGit2Error::Other)?;
 
         let parents: Vec<git2::Commit<'_>> = match repo.head() {
             Ok(head) => match head.target() {
-                Some(oid) => vec![repo.find_commit(oid).map_err(map_git_err)?],
+                Some(oid) => vec![repo.find_commit(oid).map_err(CommitGit2Error::Other)?],
                 None => Vec::new(),
             },
             Err(_) => Vec::new(),
@@ -115,7 +124,7 @@ impl GitAdapter {
         let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
         let oid = repo
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-            .map_err(map_git_err)?;
+            .map_err(CommitGit2Error::Other)?;
         debug!(oid = %oid, "wiki commit");
         Ok(Some(oid))
     }
@@ -207,7 +216,7 @@ impl GitAdapter {
 fn commit_all_fallback(
     root: &Path,
     message: &str,
-    original: WikiError,
+    original: git2::Error,
 ) -> WikiResult<Option<git2::Oid>> {
     warn!(error = %original, root = %root.display(), "libgit2 commit failed; trying git CLI fallback");
     run_git(root, ["add", "-A"])?;
@@ -248,9 +257,13 @@ fn commit_all_fallback(
 fn commit_all_fallback(
     _root: &Path,
     _message: &str,
-    original: WikiError,
+    original: git2::Error,
 ) -> WikiResult<Option<git2::Oid>> {
-    Err(original)
+    Err(map_git_err(original))
+}
+
+fn should_try_commit_cli_fallback(error: &git2::Error) -> bool {
+    matches!(error.code(), ErrorCode::NotFound)
 }
 
 #[cfg(windows)]

@@ -578,6 +578,17 @@ pub fn discover_main_repo_root(start: &Path) -> Result<PathBuf, BootstrapError> 
 
 #[cfg(windows)]
 fn discover_main_repo_root_fallback(start: &Path) -> Result<PathBuf, BootstrapError> {
+    let is_bare = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--is-bare-repository"])
+        .output()
+        .map_err(|_| BootstrapError::NotARepo(start.to_path_buf()))?;
+    if !is_bare.status.success() {
+        return Err(BootstrapError::NotARepo(start.to_path_buf()));
+    }
+    let is_bare = String::from_utf8_lossy(&is_bare.stdout).trim() == "true";
+
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(start)
@@ -592,15 +603,27 @@ fn discover_main_repo_root_fallback(start: &Path) -> Result<PathBuf, BootstrapEr
     if common_dir.is_empty() {
         return Err(BootstrapError::NotARepo(start.to_path_buf()));
     }
-    Path::new(common_dir)
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| BootstrapError::NotARepo(start.to_path_buf()))
+    main_root_from_common_dir(Path::new(common_dir), is_bare, start)
 }
 
 #[cfg(not(windows))]
 fn discover_main_repo_root_fallback(start: &Path) -> Result<PathBuf, BootstrapError> {
     Err(BootstrapError::NotARepo(start.to_path_buf()))
+}
+
+#[cfg(any(windows, test))]
+fn main_root_from_common_dir(
+    common_dir: &Path,
+    is_bare: bool,
+    start: &Path,
+) -> Result<PathBuf, BootstrapError> {
+    if is_bare {
+        return Err(BootstrapError::NotARepo(start.to_path_buf()));
+    }
+    common_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| BootstrapError::NotARepo(start.to_path_buf()))
 }
 
 /// Strategy for [`derive_project_name`]: which path "wins" when a
@@ -1586,6 +1609,20 @@ mod tests {
         let p = Path::new(r"C:\Users\alice\Projects\my-app");
         let (name, _) = derive_project_name(p, ProjectNameStrategy::Basename).unwrap();
         assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn main_root_from_common_dir_rejects_bare_repositories() {
+        let start = Path::new("/tmp/repo.git");
+        assert!(main_root_from_common_dir(Path::new("/tmp/repo.git"), true, start).is_err());
+    }
+
+    #[test]
+    fn main_root_from_common_dir_returns_parent_for_worktree_common_dir() {
+        let root =
+            main_root_from_common_dir(Path::new("/tmp/repo/.git"), false, Path::new("/tmp/repo"))
+                .unwrap();
+        assert_eq!(root, PathBuf::from("/tmp/repo"));
     }
 
     /// Degenerate input (root, empty) returns None instead of
