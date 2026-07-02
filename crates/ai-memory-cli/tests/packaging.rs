@@ -1,6 +1,7 @@
 //! Packaging asset regression tests.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
@@ -17,39 +18,17 @@ fn read_repo(path: &str) -> String {
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+// Unix-only alongside run_wrapper_on_fake_macos below — these helpers'
+// former Git Bash arms existed to run the wrapper test on Windows, which
+// the fake-uname executable-bit limitation rules out anyway.
+#[cfg(unix)]
 fn shell_script_command(script: &Path) -> Command {
-    #[cfg(windows)]
-    {
-        let mut command = Command::new("bash");
-        command.arg(script);
-        command
-    }
-
-    #[cfg(not(windows))]
-    {
-        Command::new(script)
-    }
+    Command::new(script)
 }
 
+#[cfg(unix)]
 fn shell_path(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        let path = path.display().to_string().replace('\\', "/");
-        if path.len() >= 3 && path.as_bytes()[1] == b':' {
-            format!(
-                "/{}/{}",
-                path[..1].to_ascii_lowercase(),
-                path[3..].trim_start_matches('/')
-            )
-        } else {
-            path
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        path.display().to_string()
-    }
+    path.display().to_string()
 }
 
 // Unix-only: the macOS simulation works by shadowing `uname` with a fake
