@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-02
+
 ### Added
 - Added `ai-memory finalize-session`, a supported manual Codex finalization
   flow. It defaults to the latest open Codex session in the current
@@ -1490,7 +1492,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.7.0
 [1.6.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.6.0
 [1.5.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.5.0
 [1.4.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.4.1
