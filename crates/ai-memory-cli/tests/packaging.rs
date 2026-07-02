@@ -52,6 +52,12 @@ fn shell_path(path: &Path) -> String {
     }
 }
 
+// Unix-only: the macOS simulation works by shadowing `uname` with a fake
+// script earlier in PATH, which requires setting its executable bit. NTFS
+// has no mode bits, so on a Windows host MSYS bash skips the non-executable
+// fake and the real `uname.exe` reports MSYS_NT-* — the Darwin arm under
+// test can never fire there.
+#[cfg(unix)]
 fn run_wrapper_on_fake_macos(args: &[&str]) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let docker_args = tmp.path().join("docker-args.txt");
@@ -189,6 +195,7 @@ fn docker_publish_jobs_use_prebuilt_binaries() {
     assert!(ci.contains("--target runtime-prebuilt-amd64"));
 }
 
+#[cfg(unix)]
 #[test]
 fn macos_wrapper_routes_urls_by_real_subcommand() {
     for subcommand in ["install-mcp", "install-hooks", "setup-agent"] {
