@@ -71,10 +71,10 @@ pub use oidc::{
 };
 pub use openai::OpenAiProvider;
 pub use openai_compat::OpenAiCompatProvider;
-pub use opencode::{OPENCODE_DEFAULT_MODEL, OPENCODE_ZEN_BASE_URL, OpenCodeProvider};
 pub use openai_oauth::{
     CODEX_CLIENT_ID, CODEX_RESPONSES_URL, OPENAI_OAUTH_AUTH_URL, OPENAI_OAUTH_ISSUER,
     OPENAI_OAUTH_TOKEN_URL, OpenAiOAuthProvider, OpenAiOAuthToken, OpenAiOAuthTokenResponse,
 };
+pub use opencode::{OPENCODE_DEFAULT_MODEL, OPENCODE_ZEN_BASE_URL, OpenCodeProvider};
 pub use provider::{LlmProvider, complete_structured};
 pub use types::{ChatMessage, ChatRequest, ChatResponse, Role, Usage};

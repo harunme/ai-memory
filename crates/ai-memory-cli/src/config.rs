@@ -1336,6 +1336,36 @@ mod tests {
     }
 
     #[test]
+    fn opencode_provider_resolves_choice_default_model_and_api_key() {
+        for spelling in ["opencode", "opencode-zen", "opencode_zen"] {
+            let cfg = Config {
+                llm_provider: Some(spelling.into()),
+                runtime_env: RuntimeEnv {
+                    opencode_api_key: Some(SecretString::from("sk-opencode-test")),
+                    ..RuntimeEnv::default()
+                },
+                ..Config::default()
+            };
+
+            let provider = cfg.llm_provider_config().unwrap().unwrap();
+            assert_eq!(provider.provider, ProviderChoice::OpenCode, "{spelling}");
+            assert_eq!(provider.model, "claude-sonnet-4-6", "{spelling}");
+            assert_eq!(
+                provider.auth.requirement(),
+                AuthRequirement::RequiredApiKey {
+                    env_var: "OPENCODE_API_KEY"
+                },
+                "{spelling}"
+            );
+            assert_eq!(
+                provider.auth.require_api_key().unwrap().expose_secret(),
+                "sk-opencode-test",
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
     fn anthropic_oauth_provider_underscore_alias_also_resolves() {
         let cfg = Config {
             llm_provider: Some("anthropic_oauth".into()),

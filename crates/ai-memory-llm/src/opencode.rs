@@ -33,8 +33,7 @@ impl OpenCodeProvider {
     /// # Errors
     /// Returns a `reqwest::Error` if the HTTP client cannot be built.
     pub fn new(api_key: SecretString, model: impl Into<String>) -> LlmResult<Self> {
-        let inner =
-            OpenAiCompatProvider::new(OPENCODE_ZEN_BASE_URL, Some(api_key), model.into())?;
+        let inner = OpenAiCompatProvider::new(OPENCODE_ZEN_BASE_URL, Some(api_key), model.into())?;
         Ok(Self { inner })
     }
 }
