@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Every CLI command panicked at startup on read-only filesystems
+  (sandboxes like ai-jail) when the log directory already existed but the
+  log *file* couldn't be created — the half of the failure the existing
+  tempdir fallback didn't cover, because it only triggered on directory-
+  creation errors and used the panicking appender constructor. File
+  logging now degrades instead of failing: `<data_dir>/logs` → the OS
+  temp dir → stderr-only, with a warning naming the exact path that
+  failed at each step (so sandbox users know what to `--rw-map`), and
+  commands keep working regardless ([#158]).
+
 ## [1.10.0] - 2026-07-09
 
 ### Added

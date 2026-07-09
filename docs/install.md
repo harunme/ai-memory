@@ -1185,6 +1185,18 @@ inferring from git history). The wiki is git-versioned precisely so
 this is recoverable: review what landed, `docker exec ai-memory git
 -C /data/wiki diff HEAD~1`, and revert if it's off.
 
+## Logs and read-only sandboxes
+
+The CLI and server write daily-rolling logs to `<data_dir>/logs/`
+(`~/.local/share/ai-memory/logs/` by default). When that location is not
+writable — sandboxes like [ai-jail](https://github.com/akitaonrails/ai-jail)
+mount `$HOME` read-only or as throwaway tmpfs — ai-memory degrades instead
+of failing: it falls back to the OS temp dir, then to stderr-only logging,
+printing the exact path that failed at each step. Commands keep working
+either way. To keep durable file logs (and durable hook spooling) inside a
+sandbox, map the data dir read-write, e.g. `ai-jail --rw-map
+~/.local/share/ai-memory …`.
+
 ## Operating without auth
 
 For local-only / single-machine deploys you can skip the bearer
