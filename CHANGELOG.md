@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-09
+
 ### Fixed
 - Mid-session events can no longer scatter observations into basename
   "fragment" projects (`sources`, `desktop`, …). The hook router now uses
@@ -1657,7 +1659,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.10.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.0
 [1.10.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.10.1
 [1.10.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.10.0
 [1.9.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.9.1
