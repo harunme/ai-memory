@@ -105,6 +105,30 @@ pub fn get_or_create_workspace(
     Ok(id)
 }
 
+/// Names of other workspaces that already contain a project called `name`
+/// (excluding `workspace_id`), ordered by workspace name. Homonymous
+/// projects across workspaces are legal — rows are id-namespaced — but on
+/// *creation* a non-empty result is almost always an accidental misroute,
+/// so the caller can surface a warning. Runs inside the caller's `tx`.
+fn project_name_in_other_workspaces(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &ai_memory_core::WorkspaceId,
+    name: &str,
+) -> StoreResult<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT w.name FROM projects p \
+         JOIN workspaces w ON w.id = p.workspace_id \
+         WHERE p.name = ?1 AND p.workspace_id != ?2 \
+         ORDER BY w.name",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![name, workspace_id.as_bytes()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Resolve a project by `(workspace_id, name)`, creating it if missing.
 /// Atomic.
 pub fn get_or_create_project(
@@ -125,6 +149,16 @@ pub fn get_or_create_project(
     let id = if let Some(bytes) = existing {
         ai_memory_core::ProjectId::from_slice(&bytes)?
     } else {
+        let also_in = project_name_in_other_workspaces(&tx, workspace_id, name)?;
+        if !also_in.is_empty() {
+            tracing::warn!(
+                project = name,
+                also_in = ?also_in,
+                "creating a project whose name already exists in other \
+                 workspace(s) — legal (id-namespaced) but often an \
+                 accidental misroute"
+            );
+        }
         let id = ai_memory_core::ProjectId::new();
         tx.execute(
             "INSERT INTO projects (id, workspace_id, name, repo_path, created_at) \
@@ -1515,6 +1549,43 @@ mod tests {
                 )
             });
         }
+    }
+
+    #[test]
+    fn get_or_create_project_flags_homonym_across_workspaces() {
+        let (_tmp, mut conn, _ws, _proj) = fresh_db();
+        let ws_a = get_or_create_workspace(&mut conn, "alpha").unwrap();
+        let ws_b = get_or_create_workspace(&mut conn, "beta").unwrap();
+        let a_shared = get_or_create_project(&mut conn, &ws_a, "shared", None).unwrap();
+
+        // "shared" already lives in `alpha`, so from `beta`'s side it is a
+        // cross-workspace homonym; the owning workspace and unique names
+        // flag nothing.
+        {
+            let tx = conn.transaction().unwrap();
+            assert_eq!(
+                project_name_in_other_workspaces(&tx, &ws_b, "shared").unwrap(),
+                vec!["alpha".to_string()]
+            );
+            assert!(
+                project_name_in_other_workspaces(&tx, &ws_a, "shared")
+                    .unwrap()
+                    .is_empty(),
+                "the owning workspace must be excluded"
+            );
+            assert!(
+                project_name_in_other_workspaces(&tx, &ws_b, "unique-name")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        // Creation is NOT blocked — the homonym is id-namespaced.
+        let b_shared = get_or_create_project(&mut conn, &ws_b, "shared", None).unwrap();
+        assert_ne!(
+            a_shared, b_shared,
+            "homonymous projects must get distinct ids"
+        );
     }
 
     fn fresh_db() -> (
