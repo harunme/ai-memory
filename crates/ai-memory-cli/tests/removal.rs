@@ -726,7 +726,8 @@ fn uninstall_dry_run_previews_purge() {
     let normalized_stdout = normalize_path_text(&stdout);
     for sub in ["wiki", "db", "raw"] {
         let p = data.path().join(sub);
-        let expected = normalize_path_text(p.display().to_string());
+        let expected_path = p.canonicalize().unwrap_or_else(|_| p.clone());
+        let expected = normalize_path_text(expected_path.display().to_string());
         assert!(
             normalized_stdout.contains(&format!("would purge {expected}")),
             "missing full {sub} path {expected} in: {stdout}"
