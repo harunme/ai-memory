@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-07-11
+
 ### Fixed
 - `ai-memory install-instructions` and `ai-memory uninstall --only instructions`
   now match only line-anchored routing markers, handle CRLF marker lines, and
@@ -1700,7 +1702,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.2...HEAD
+[1.11.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.2
 [1.11.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.1
 [1.11.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.0
 [1.10.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.10.1
