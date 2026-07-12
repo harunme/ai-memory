@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-12
+
 ### Added
 - New `.ai-memory.toml` marker section `[briefing] inject_on_session_start
   = "true"` ([#176]): the session-start handoff fetch also returns a
@@ -1783,7 +1785,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.4...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.12.0
 [1.11.4]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.4
 [1.11.3]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.3
 [1.11.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.2
