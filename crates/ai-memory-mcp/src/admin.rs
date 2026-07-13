@@ -4411,6 +4411,7 @@ async fn handle_delete_page(
     State(state): State<Arc<AdminState>>,
     actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
     level_ext: Option<axum::Extension<ai_memory_core::AuthLevel>>,
+    author_ext: Option<axum::Extension<ai_memory_core::UserId>>,
     headers: HeaderMap,
     Json(req): Json<DeletePageAdminRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -4451,9 +4452,10 @@ async fn handle_delete_page(
         None
     };
 
+    let author_id = author_ext.map(|axum::Extension(u)| u);
     state
         .wiki
-        .delete_page(ws, proj, &path, admission_ctx)
+        .delete_page(ws, proj, &path, admission_ctx, author_id)
         .await
         .map_err(|e| internal_err(e.to_string()))?;
     let checkpoint = checkpoint_or_warn(

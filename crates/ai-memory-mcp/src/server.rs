@@ -2043,7 +2043,8 @@ impl AiMemoryServer {
         let pre_checkpoint =
             checkpoint_or_mcp(wiki, format!("pre-memory_delete_page: {}", path.as_str()))?;
 
-        wiki.delete_page(ws, proj, &path, admission_ctx)
+        let author_id = crate::actor::author_id_from_parts(&parts);
+        wiki.delete_page(ws, proj, &path, admission_ctx, author_id)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let checkpoint = checkpoint_or_warn(wiki, format!("memory_delete_page: {}", path.as_str()));
