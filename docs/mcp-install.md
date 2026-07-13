@@ -492,6 +492,23 @@ Session-start handoff injection is built in: the generated Devin SessionStart
 hook returns `hookSpecificOutput.additionalContext` when a pending handoff is
 available.
 
+Real Devin hook payloads may omit `session_id` and `cwd`; the installed hooks
+fill both in:
+
+- **cwd** — the payload's `cwd` wins when present, then the
+  `DEVIN_PROJECT_DIR` environment variable (when Devin's launcher provides
+  it), then the hook process working directory.
+- **session id** — when the payload has none, the hook mints one at
+  `SessionStart`, stores it in a single per-host slot
+  (`<data-dir>/hook-state/devin-session-id`), reuses it for every later
+  event, and clears it at `SessionEnd`. Set `AI_MEMORY_SESSION_ID` in the
+  hook environment to pin an externally managed run id instead. Because the
+  slot is per host+agent, two Devin sessions running *concurrently* on the
+  same machine share it — the newest `SessionStart` wins and earlier
+  sessions' remaining events are attributed to it (same graceful-degradation
+  stance as the single-slot `/handoff` fallback). A payload that does carry
+  its own `session_id` always wins over both.
+
 ## OpenClaw
 
 **Status:** ✅ MCP supported. ✅ Lifecycle hooks supported via a native

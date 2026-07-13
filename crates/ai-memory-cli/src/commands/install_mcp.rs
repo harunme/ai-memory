@@ -309,14 +309,14 @@ fn render_json_mcp_fragment(args: &InstallMcpArgs) -> Result<String> {
 /// `httpUrl` plus optional `headers`. Returns the per-client variant.
 fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
     let bearer = bearer_header_value(args.auth_token.as_deref());
+    // `run()` resolves the URL before dispatch; the fallback only fires for
+    // direct callers (tests, uninstall re-render) that skip that step.
+    let server_url = args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL);
     let mut entry = serde_json::Map::new();
     match args.client {
         McpClient::ClaudeCode => {
             entry.insert("type".into(), json!("http"));
-            entry.insert(
-                "url".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("url".into(), json!(server_url));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
@@ -324,11 +324,7 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
         McpClient::ClaudeDesktop => {
             // Stdio shim via mcp-remote — Claude Desktop's JSON
             // doesn't accept HTTP transport directly.
-            let mut cmd_args = vec![
-                json!("-y"),
-                json!("mcp-remote"),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            ];
+            let mut cmd_args = vec![json!("-y"), json!("mcp-remote"), json!(server_url)];
             if let Some(b) = &bearer {
                 cmd_args.push(json!("--header"));
                 cmd_args.push(json!("Authorization:${AI_MEMORY_AUTH_HEADER}"));
@@ -338,19 +334,13 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
             entry.insert("args".into(), serde_json::Value::Array(cmd_args));
         }
         McpClient::Cursor => {
-            entry.insert(
-                "url".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("url".into(), json!(server_url));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
         }
         McpClient::GeminiCli => {
-            entry.insert(
-                "httpUrl".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("httpUrl".into(), json!(server_url));
             entry.insert("timeout".into(), json!(GEMINI_MCP_TIMEOUT_MS));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
@@ -358,30 +348,21 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
         }
         McpClient::Omp => {
             entry.insert("type".into(), json!("http"));
-            entry.insert(
-                "url".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("url".into(), json!(server_url));
             entry.insert("enabled".into(), json!(true));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
         }
         McpClient::AntigravityCli => {
-            entry.insert(
-                "serverUrl".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("serverUrl".into(), json!(server_url));
             entry.insert("timeout".into(), json!(GEMINI_MCP_TIMEOUT_MS));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
         }
         McpClient::Devin => {
-            entry.insert(
-                "url".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("url".into(), json!(server_url));
             entry.insert("transport".into(), json!("http"));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
@@ -394,10 +375,7 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
             // The `mcpServers` key (used by Claude Code/Cursor/Gemini)
             // is silently ignored here — VS Code reads `servers`.
             entry.insert("type".into(), json!("http"));
-            entry.insert(
-                "url".into(),
-                json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-            );
+            entry.insert("url".into(), json!(server_url));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
@@ -409,12 +387,10 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
 
 fn build_mcp_entry_opencode(args: &InstallMcpArgs) -> Result<serde_json::Value> {
     let bearer = bearer_header_value(args.auth_token.as_deref());
+    let server_url = args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL);
     let mut entry = serde_json::Map::new();
     entry.insert("type".into(), json!("remote"));
-    entry.insert(
-        "url".into(),
-        json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-    );
+    entry.insert("url".into(), json!(server_url));
     entry.insert("enabled".into(), json!(true));
     if let Some(b) = bearer {
         entry.insert("headers".into(), json!({"Authorization": b}));
@@ -424,11 +400,9 @@ fn build_mcp_entry_opencode(args: &InstallMcpArgs) -> Result<serde_json::Value> 
 
 fn build_mcp_entry_openclaw(args: &InstallMcpArgs) -> Result<serde_json::Value> {
     let bearer = bearer_header_value(args.auth_token.as_deref());
+    let server_url = args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL);
     let mut entry = serde_json::Map::new();
-    entry.insert(
-        "url".into(),
-        json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-    );
+    entry.insert("url".into(), json!(server_url));
     entry.insert("transport".into(), json!("streamable-http"));
     if let Some(b) = bearer {
         entry.insert("headers".into(), json!({"Authorization": b}));
@@ -441,12 +415,10 @@ fn build_mcp_entry_openclaw(args: &InstallMcpArgs) -> Result<serde_json::Value> 
 /// `type: "http"` + `url` + a `headers` map (issue #156).
 fn build_mcp_entry_zero(args: &InstallMcpArgs) -> Result<serde_json::Value> {
     let bearer = bearer_header_value(args.auth_token.as_deref());
+    let server_url = args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL);
     let mut entry = serde_json::Map::new();
     entry.insert("type".into(), json!("http"));
-    entry.insert(
-        "url".into(),
-        json!(args.server_url.as_deref().unwrap_or(DEFAULT_MCP_URL)),
-    );
+    entry.insert("url".into(), json!(server_url));
     if let Some(b) = bearer {
         entry.insert("headers".into(), json!({"Authorization": b}));
     }

@@ -307,7 +307,8 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
     if want(crate::cli::UninstallOnly::Skills) {
         let cwd = std::env::current_dir().context("getting CWD for skill removal")?;
         let home = home_dir();
-        for root in skill_roots(&cwd, home.as_deref()) {
+        let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+        for root in skill_roots(&cwd, home.as_deref(), appdata.as_deref()) {
             for skill in MANAGED_SKILLS {
                 push_generated_delete(
                     &mut plan,
@@ -321,8 +322,8 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
     Ok(plan)
 }
 
-fn skill_roots(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(6);
+fn skill_roots(cwd: &Path, home: Option<&Path>, appdata: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(7);
     push_unique_skill_root(&mut roots, cwd.join(CLAUDE_SKILL_DIR).join(SKILLS_DIR));
     push_unique_skill_root(&mut roots, cwd.join(AGENTS_SKILL_DIR).join(SKILLS_DIR));
     push_unique_skill_root(&mut roots, cwd.join(DEVIN_SKILL_DIR).join(SKILLS_DIR));
@@ -330,6 +331,11 @@ fn skill_roots(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
         push_unique_skill_root(&mut roots, home.join(CLAUDE_SKILL_DIR).join(SKILLS_DIR));
         push_unique_skill_root(&mut roots, home.join(AGENTS_SKILL_DIR).join(SKILLS_DIR));
         push_unique_skill_root(&mut roots, home.join(DEVIN_SKILL_DIR).join(SKILLS_DIR));
+    }
+    // Windows global Devin installs live under %APPDATA%\devin\skills, not
+    // $HOME/.devin/skills — sweep it too or uninstall orphans those skills.
+    if let Some(appdata) = appdata {
+        push_unique_skill_root(&mut roots, appdata.join("devin").join(SKILLS_DIR));
     }
     roots
 }
@@ -961,6 +967,25 @@ fn strip_mcp_toml(content: &str, name: Option<&str>, url: &str) -> Result<(Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Windows global Devin skill root (`%APPDATA%\devin\skills`) is
+    /// swept alongside the cwd/home roots — `install-skills --scope global`
+    /// writes there on Windows, so uninstall must plan its removal too.
+    #[test]
+    fn skill_roots_include_windows_appdata_devin_root() {
+        let cwd = Path::new("/repo");
+        let home = Path::new("/home/alice");
+        let appdata = Path::new("C:/Users/Alice/AppData/Roaming");
+
+        let roots = skill_roots(cwd, Some(home), Some(appdata));
+        assert!(
+            roots.contains(&appdata.join("devin").join(SKILLS_DIR)),
+            "{roots:?}"
+        );
+
+        let without = skill_roots(cwd, Some(home), None);
+        assert_eq!(without.len(), 6, "no phantom root when APPDATA is unset");
+    }
 
     #[test]
     fn strip_instructions_round_trips_with_install_append() {

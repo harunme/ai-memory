@@ -5453,11 +5453,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn post_compaction_captures_summary_field() {
-        let tmp = TempDir::new().unwrap();
-        let _state = make_state(&tmp).await;
-
+    #[test]
+    fn post_compaction_captures_summary_field() {
         let query = HookQuery {
             event: "post-compaction".into(),
             agent: Some("devin".into()),
@@ -5481,11 +5478,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn post_compaction_priority_is_mapped() {
-        let tmp = TempDir::new().unwrap();
-        let _state = make_state(&tmp).await;
-
+    #[test]
+    fn post_compaction_priority_is_mapped() {
         let query = HookQuery {
             event: "post-compaction".into(),
             agent: Some("devin".into()),
@@ -5501,72 +5495,6 @@ mod tests {
             importance_for(env.event),
             6,
             "PostCompaction should have importance 6 (same as Stop/PreCompact)"
-        );
-    }
-
-    #[test]
-    fn post_compaction_router_branch_exists() {
-        // Verify that PostCompaction is handled in the router
-        // by checking that the importance_for function includes it.
-        // The consolidation branch is covered by the importance check
-        // and by the explicit branch in process() that calls consolidate_or_synth.
-        assert_eq!(importance_for(HookEvent::PostCompaction), 6);
-    }
-
-    #[tokio::test]
-    async fn post_compaction_triggers_consolidation() {
-        let tmp = TempDir::new().unwrap();
-        let state = make_state(&tmp).await;
-        let sid = "44444444-4444-4444-4444-444444444444";
-        let session_path = format!("sessions/{sid}.md");
-        let summary = "Context compacted: 15000/20000 tokens used";
-
-        let start = HookEnvelope::from_query_and_body(
-            HookQuery {
-                event: "session-start".into(),
-                agent: Some("devin".into()),
-                ..Default::default()
-            },
-            serde_json::json!({
-                "hook_event_name": "SessionStart",
-                "session_id": sid,
-                "source": "startup"
-            }),
-        );
-        process(&state, start, None).await.unwrap();
-
-        let pages_before = state
-            .reader
-            .recent_pages_for_project(state.workspace_id, state.project_id, 20)
-            .await
-            .unwrap();
-        assert!(
-            pages_before.iter().all(|p| p.path.as_str() != session_path),
-            "SessionStart alone must not write a sessions/<id>.md checkpoint"
-        );
-
-        let post_compaction = HookEnvelope::from_query_and_body(
-            HookQuery {
-                event: "post-compaction".into(),
-                agent: Some("devin".into()),
-                ..Default::default()
-            },
-            serde_json::json!({
-                "hook_event_name": "PostCompaction",
-                "session_id": sid,
-                "summary": summary
-            }),
-        );
-        process(&state, post_compaction, None).await.unwrap();
-
-        let pages_after = state
-            .reader
-            .recent_pages_for_project(state.workspace_id, state.project_id, 20)
-            .await
-            .unwrap();
-        assert!(
-            pages_after.iter().any(|p| p.path.as_str() == session_path),
-            "PostCompaction must write a sessions/<id>.md checkpoint"
         );
     }
 

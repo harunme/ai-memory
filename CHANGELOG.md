@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload `cwd` still wins, followed by `DEVIN_PROJECT_DIR`, then the hook
   process working directory. This keeps real Devin `SessionStart` /
   `PostToolUse` fixtures routable without inventing a payload field.
+  Payloads without a `session_id` are bridged the same way: a per-host id is
+  minted at `SessionStart`, reused for later events, and cleared at
+  `SessionEnd`; set `AI_MEMORY_SESSION_ID` in the hook environment to pin an
+  externally managed run id. A payload-supplied id always wins.
 
 ## [1.12.0] - 2026-07-12
 
@@ -282,6 +286,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   '{{.SecurityOptions}}'` and runs as `-u 0:0` for just the commands that
   write host-side files; thin-client commands (`status`, `bootstrap`, …)
   are unaffected since they only touch the `/data` named volume.
+
 ## [1.8.0] - 2026-07-04
 
 ### Added
