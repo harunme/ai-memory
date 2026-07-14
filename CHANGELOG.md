@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `install-mcp --server-url` now appends the `/mcp` path when given a base
+  URL (the same value `install-hooks --server-url` takes), instead of
+  rendering a client config that points at the server root and 404s. The
+  suffix join is idempotent, so passing the full `…/mcp` endpoint still
+  works unchanged; only a URL deliberately pointing MCP at a path not
+  ending in `/mcp` (an exotic reverse-proxy rewrite) would notice
+  ([#185]).
 - Opening a store whose schema is *newer* than the running binary now fails
   with an actionable error instead of refinery's raw "migration V… is missing
   from the filesystem" wording. When an applied migration is absent from the
