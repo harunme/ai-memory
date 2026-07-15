@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New admin endpoint `POST /admin/merge-workspace {from, to, confirm}`: fold
+  every project of one workspace into another, then delete the emptied source
+  workspace — completing the workspace CRUD surface alongside rename/delete.
+  It is sugar over move-project: each source project runs the same validated
+  path, so a project that already exists in the destination merges by content
+  (copy-purge under `on_conflict`) while a fresh one is a lossless re-stamp.
+  Destructive, so `confirm=true` is required; `force` overrides the
+  live-session guard per project. It stops at the first failing project — the
+  moves already committed stand, and the failing project plus the source
+  workspace are left intact for the operator to resolve and re-run (moves are
+  idempotent) ([#187]).
+
 ### Fixed
 - `install-mcp --server-url` now appends the `/mcp` path when given a base
   URL (the same value `install-hooks --server-url` takes), instead of
