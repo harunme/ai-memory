@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use crate::capture_policy::{
     CaptureConfig, CaptureDisposition, CapturePolicy, CaptureProtocol, CaptureSource, PolicyState,
-    ToolFamily, metadata_only_body,
+    ToolFamily, metadata_only_body, tool_observation_outcome, valid_call_id,
 };
 use crate::log;
 use crate::payload::{
@@ -759,7 +759,12 @@ fn metadata_only_protocol_envelope(
     );
     raw.insert("_ai_memory_capture".into(), serde_json::json!(protocol));
     env.title_hint = Some(canonical_tool_name(protocol.tool_family()).into());
-    env.body_excerpt = None;
+    env.body_excerpt = metadata_summary_with_outcome(
+        env.event,
+        protocol.tool_family(),
+        object.get("tool_call_id"),
+        "unknown",
+    );
     env.raw = serde_json::Value::Object(raw);
     Some(env)
 }
@@ -772,13 +777,7 @@ const fn metadata_protocol_is_legal(protocol: &CaptureProtocol) -> bool {
 }
 
 fn valid_metadata_call_id(value: &serde_json::Value) -> bool {
-    value.as_str().is_some_and(|id| {
-        !id.is_empty()
-            && id.len() <= 256
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    })
+    value.as_str().is_some_and(valid_call_id)
 }
 
 /// Whether a claimed protocol can be produced by the claimed policy state for
@@ -833,6 +832,7 @@ fn metadata_envelope(
     protocol: Option<&CaptureProtocol>,
 ) -> HookEnvelope {
     let protocol = protocol.unwrap_or(decision.protocol());
+    let outcome = tool_observation_outcome(env.agent, &env.raw);
     let mut raw = metadata_only_body(env.session_id.as_deref(), env.cwd.as_deref(), decision);
     if let Some(object) = raw.as_object_mut() {
         object.insert(
@@ -848,9 +848,35 @@ fn metadata_envelope(
     // These were extracted from the pre-replacement raw body. Clearing them is
     // essential: normal extraction must never retain a removed payload.
     env.title_hint = Some(canonical_tool_name(protocol.tool_family()).into());
-    env.body_excerpt = None;
+    env.body_excerpt = metadata_summary_with_outcome(
+        env.event,
+        protocol.tool_family(),
+        raw.get("tool_call_id"),
+        outcome.as_str(),
+    );
     env.raw = raw;
     env
+}
+
+fn metadata_summary_with_outcome(
+    event: HookEvent,
+    family: ToolFamily,
+    call_id: Option<&serde_json::Value>,
+    outcome: &str,
+) -> Option<String> {
+    if !matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse) {
+        return None;
+    }
+    let mut body = format!("tool_family: {}", canonical_tool_name(family));
+    if let Some(id) = call_id.and_then(serde_json::Value::as_str) {
+        body.push_str("\ntool_call_id: ");
+        body.push_str(id);
+    }
+    if event == HookEvent::PostToolUse {
+        body.push_str("\noutcome: ");
+        body.push_str(outcome);
+    }
+    Some(body)
 }
 
 const fn canonical_tool_name(family: ToolFamily) -> &'static str {
@@ -5923,7 +5949,10 @@ mod tests {
         );
         let env = inspect_capture_envelope(env).unwrap();
         assert_eq!(env.title_hint.as_deref(), Some("file"));
-        assert!(env.body_excerpt.is_none());
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\noutcome: unknown")
+        );
         assert!(!env.raw.to_string().contains("SENTINEL_SECRET"));
         assert_eq!(env.raw["tool_name"], "file");
     }
@@ -6027,7 +6056,10 @@ mod tests {
         assert_eq!(env.raw["session_id"], "native-metadata");
         assert_eq!(env.raw["cwd"], "/repo");
         assert_eq!(env.raw["tool_call_id"], "safe-ID.1");
-        assert!(env.body_excerpt.is_none());
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\ntool_call_id: safe-ID.1\noutcome: unknown")
+        );
     }
 
     #[test]
@@ -6047,7 +6079,10 @@ mod tests {
         let env = inspect_capture_envelope(env).unwrap();
         assert_eq!(env.raw["session_id"], "generated-metadata");
         assert_eq!(env.raw["cwd"], "/generated");
-        assert!(env.body_excerpt.is_none());
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\noutcome: unknown")
+        );
     }
 
     #[test]
@@ -6067,6 +6102,48 @@ mod tests {
         let env = inspect_capture_envelope(env).unwrap();
         assert!(!env.raw.to_string().contains("SENTINEL_SECRET"));
         assert!(env.raw.get("extra").is_none());
+    }
+
+    #[test]
+    fn capture_protocol_metadata_only_ignores_pi_and_antigravity_outcome_extras() {
+        for (agent, extra) in [
+            (
+                "pi",
+                serde_json::json!({"isError": true, "output": "PI_SENTINEL"}),
+            ),
+            (
+                "antigravity-cli",
+                serde_json::json!({"error": "AGY_SENTINEL", "output": "OUTPUT_SENTINEL"}),
+            ),
+        ] {
+            let mut body = serde_json::json!({
+                "tool_family": "file", "tool_name": "file",
+                "_ai_memory_capture": capture_protocol("metadata-only", "invalid", "file", 0, "missing-or-malformed"),
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let env = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "post-tool-use".into(),
+                    agent: Some(agent.into()),
+                    ..Default::default()
+                },
+                body,
+            );
+            let env = inspect_capture_envelope(env).unwrap();
+            assert_eq!(
+                env.body_excerpt.as_deref(),
+                Some("tool_family: file\noutcome: unknown")
+            );
+            for sentinel in ["PI_SENTINEL", "AGY_SENTINEL", "OUTPUT_SENTINEL"] {
+                assert!(!env.raw.to_string().contains(sentinel));
+                assert!(!env.body_excerpt.as_deref().unwrap().contains(sentinel));
+            }
+            assert!(env.raw.get("isError").is_none());
+            assert!(env.raw.get("error").is_none());
+            assert!(env.raw.get("output").is_none());
+        }
     }
 
     #[tokio::test]
@@ -6131,8 +6208,8 @@ mod tests {
         );
         let metadata = inspect_capture_envelope(metadata).expect("valid metadata is retained");
         assert!(
-            metadata.body_excerpt.is_none(),
-            "old envelope extraction sees no body"
+            metadata.body_excerpt.as_deref() == Some("tool_family: file\noutcome: unknown"),
+            "metadata-only protocol renders only its safe summary"
         );
         process(&state, metadata, None).await.unwrap();
 
@@ -6169,11 +6246,9 @@ mod tests {
         assert!(observations.iter().all(|observation| {
             observation.body.is_empty() || !observation.body.contains(SENTINEL)
         }));
-        assert!(
-            observations
-                .iter()
-                .any(|observation| observation.title == "file" && observation.body.is_empty())
-        );
+        assert!(observations.iter().any(|observation| {
+            observation.title == "file" && observation.body == "tool_family: file\noutcome: unknown"
+        }));
         assert!(
             state
                 .reader
@@ -6260,7 +6335,10 @@ mod tests {
         );
         let env = inspect_capture_envelope(env).unwrap();
         assert_eq!(env.title_hint.as_deref(), Some("file"));
-        assert!(env.body_excerpt.is_none());
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("tool_family: file\noutcome: unknown")
+        );
         assert!(!env.raw.to_string().contains("SENTINEL_SECRET"));
         assert_eq!(env.raw["_ai_memory_capture"]["policy_state"], "invalid");
         assert_eq!(
@@ -6347,7 +6425,7 @@ mod tests {
         assert_eq!(observations.len(), 2, "Drop must not be stored");
         let metadata = observations.last().unwrap();
         assert_eq!(metadata.title, "file");
-        assert!(metadata.body.is_empty());
+        assert_eq!(metadata.body, "tool_family: file\noutcome: unknown");
         assert!(
             observations
                 .iter()

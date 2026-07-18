@@ -92,6 +92,94 @@ pub enum ToolFamily {
     Unknown,
 }
 
+/// Safe, closed-schema tool metadata suitable for an observation body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolObservationMetadata {
+    pub(crate) tool_family: ToolFamily,
+    pub(crate) tool_call_id: Option<String>,
+}
+
+/// Safe outcome class for a completed tool call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolOutcome {
+    Success,
+    Error,
+    Unknown,
+}
+
+impl ToolOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Extracts only the closed, fixture-backed metadata schemas used for tool
+/// observations. It intentionally does not reuse broad envelope fallbacks.
+pub(crate) fn tool_observation_metadata(
+    agent: AgentKind,
+    raw: &Value,
+    require_input: bool,
+) -> Option<ToolObservationMetadata> {
+    let object = raw.as_object()?;
+    let (name, id) = match agent {
+        AgentKind::ClaudeCode => (
+            object.get("tool_name")?.as_str()?,
+            object.get("tool_use_id").and_then(Value::as_str),
+        ),
+        AgentKind::OpenCode => (
+            object.get("tool")?.as_str()?,
+            object.get("callID").and_then(Value::as_str),
+        ),
+        AgentKind::Pi => (
+            object.get("tool")?.as_str()?,
+            object.get("callID").and_then(Value::as_str),
+        ),
+        AgentKind::AntigravityCli => (object.get("toolCall")?.get("name")?.as_str()?, None),
+        _ => return None,
+    };
+    // PreToolUse needs a proven input shape. PostToolUse deliberately does
+    // not: established adapters commonly omit inputs from their response.
+    let has_args = !require_input
+        || match agent {
+            AgentKind::AntigravityCli => object.get("toolCall")?.get("args").is_some(),
+            _ => object
+                .get(if agent == AgentKind::ClaudeCode {
+                    "tool_input"
+                } else {
+                    "args"
+                })
+                .is_some(),
+        };
+    has_args.then(|| ToolObservationMetadata {
+        tool_family: family(name),
+        tool_call_id: id.filter(|id| valid_call_id(id)).map(str::to_owned),
+    })
+}
+
+/// Extracts an outcome only where the adapter protocol proves its meaning.
+pub(crate) fn tool_observation_outcome(agent: AgentKind, raw: &Value) -> ToolOutcome {
+    match agent {
+        AgentKind::Pi => match raw.get("isError").and_then(Value::as_bool) {
+            Some(true) => ToolOutcome::Error,
+            Some(false) => ToolOutcome::Success,
+            None => ToolOutcome::Unknown,
+        },
+        AgentKind::AntigravityCli
+            if raw
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| !error.is_empty()) =>
+        {
+            ToolOutcome::Error
+        }
+        _ => ToolOutcome::Unknown,
+    }
+}
+
 /// Strict, bounded reserved protocol body.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CaptureProtocol {
@@ -486,7 +574,7 @@ fn canonical(family: ToolFamily) -> CanonicalTool {
         ToolFamily::Unknown => CanonicalTool::Unknown,
     }
 }
-fn valid_call_id(id: &str) -> bool {
+pub(crate) fn valid_call_id(id: &str) -> bool {
     !id.is_empty()
         && id.chars().count() <= MAX_CALL_ID_CHARS
         && id

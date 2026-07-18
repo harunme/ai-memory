@@ -192,10 +192,19 @@ printf '%s\n' '{"session_id":"demo","cwd":"/example/workspace","tool_name":"Edit
       --server-url http://127.0.0.1:49374 --check-capture
 ```
 
-The normal capture contract is intentionally narrow: `PostToolUse` stores the
-tool-response excerpt, capped at 2,000 bytes. User-prompt stores its prompt
+The normal capture contract is intentionally narrow: supported Claude Code,
+OpenCode, Pi, and Antigravity tool events retain only canonical tool family,
+an agent-provided validated call ID when their documented schema proves one,
+and a PostToolUse outcome class. `PreToolUse` never retains commands,
+arguments, paths, input bodies, or arbitrary tool names. `PostToolUse` appends
+its existing tool-response/error excerpt and caps the complete rendered body at
+2,000 UTF-8-safe bytes. Unsupported tool envelopes do not gain a PreToolUse
+body, and association is only by matching agent-provided call IDs. User-prompt stores its prompt
 text, notification stores its message/text, and post-compaction stores its
 summary; other event bodies are currently empty unless explicitly supported.
+Stop and assistant-message capture remain disabled and deferred. The metadata
+header is closed; the PostToolUse response/error excerpt remains the existing
+bounded content capture.
 Capture exclusions are evaluated only where paths have a proven schema, so they
 do not claim to filter those other bodies.
 

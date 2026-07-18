@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Tool lifecycle capture now records safe metadata summaries for the closed
+  Claude Code, OpenCode, Pi, and Antigravity schemas: canonical family,
+  validated agent-provided call ID where available, and a PostToolUse outcome.
+  PreToolUse never stores tool inputs, commands, paths, or arbitrary tool
+  names; PostToolUse keeps its bounded response/error excerpt. Stop and
+  assistant-message capture remain disabled/deferred ([#190]).
 - Per-repository capture exclusions via `[capture] ignore_paths` in the nearest
   `.ai-memory.toml` ([#194]). Supported native hooks and generated
   OpenCode/OMP/Pi/OpenClaw integrations apply the policy before local spool or
