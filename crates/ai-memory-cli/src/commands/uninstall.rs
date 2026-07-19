@@ -288,7 +288,7 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
             let (_new, removed) = if matches!(client, Codex | Grok) {
                 strip_mcp_toml(&content, name, url)?
             } else {
-                strip_mcp_json(&content, client, name, url)?
+                strip_mcp_json_client(&content, client, name, url)?
             };
             let op = if matches!(client, Codex | Grok) {
                 RewriteOp::McpToml
@@ -939,6 +939,42 @@ fn mcp_entry_is_ours(key: &str, entry: &serde_json::Value, name: Option<&str>, u
         }
     }
     false
+}
+
+/// URL forms uninstall should match for `client`: the endpoint as given,
+/// plus — for KimiCode only — the `flavor=moonshot` form install-mcp
+/// actually writes (Moonshot rejects root-level schema combinators, so
+/// kimi's mcp.json points at `/mcp?flavor=moonshot` while `--mcp-url`
+/// keeps the unflavored default). Every other client keeps exact-match
+/// semantics.
+fn mcp_url_candidates(client: McpClient, url: &str) -> Vec<String> {
+    let mut candidates = vec![url.to_string()];
+    if matches!(client, McpClient::KimiCode) {
+        let flavored = install_mcp::moonshot_flavored_mcp_url(url);
+        if !candidates.contains(&flavored) {
+            candidates.push(flavored);
+        }
+    }
+    candidates
+}
+
+/// [`strip_mcp_json`] over each of the client's URL candidate forms, so a
+/// Kimi Code entry installed with the `flavor=moonshot` marker is still
+/// matched by the default unflavored `--mcp-url`.
+fn strip_mcp_json_client(
+    content: &str,
+    client: McpClient,
+    name: Option<&str>,
+    url: &str,
+) -> Result<(String, Vec<String>)> {
+    let mut new_content = content.to_string();
+    let mut removed = Vec::new();
+    for candidate in mcp_url_candidates(client, url) {
+        let (next, mut hits) = strip_mcp_json(&new_content, client, name, &candidate)?;
+        new_content = next;
+        removed.append(&mut hits);
+    }
+    Ok((new_content, removed))
 }
 
 /// Remove ai-memory's MCP server from a JSON client config. Returns
@@ -1797,6 +1833,49 @@ command = "'/usr/local/bin/ai-memory' hook --event stop --agent kimi-code --serv
     fn strip_mcp_kimi_code_root_servers() {
         let content = r#"{"mcpServers":{"ai-memory":{"url":"http://127.0.0.1:49374/mcp","headers":{"X-Token":"t"}},"other":{"url":"http://x"}}}"#;
         let (out, removed) = strip_mcp_json(
+            content,
+            McpClient::KimiCode,
+            Some("ai-memory"),
+            "http://127.0.0.1:49374/mcp",
+        )
+        .unwrap();
+        assert_eq!(removed, vec!["ai-memory".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mcpServers"].get("ai-memory").is_none());
+        assert!(v["mcpServers"].get("other").is_some());
+    }
+
+    #[test]
+    fn mcp_url_candidates_adds_moonshot_flavor_for_kimi_code_only() {
+        assert_eq!(
+            mcp_url_candidates(McpClient::KimiCode, "http://127.0.0.1:49374/mcp"),
+            vec![
+                "http://127.0.0.1:49374/mcp".to_string(),
+                "http://127.0.0.1:49374/mcp?flavor=moonshot".to_string()
+            ]
+        );
+        // An already-flavored --mcp-url must not stack a duplicate.
+        assert_eq!(
+            mcp_url_candidates(
+                McpClient::KimiCode,
+                "http://127.0.0.1:49374/mcp?flavor=moonshot"
+            ),
+            vec!["http://127.0.0.1:49374/mcp?flavor=moonshot".to_string()]
+        );
+        // Every other client keeps exact-match semantics.
+        assert_eq!(
+            mcp_url_candidates(McpClient::Cursor, "http://127.0.0.1:49374/mcp"),
+            vec!["http://127.0.0.1:49374/mcp".to_string()]
+        );
+    }
+
+    /// Regression: install-mcp writes kimi's entry with the
+    /// `?flavor=moonshot` marker, while `--mcp-url` keeps the unflavored
+    /// default — the exact-match strip must still find the entry.
+    #[test]
+    fn strip_mcp_kimi_code_matches_flavored_url_with_default_mcp_url() {
+        let content = r#"{"mcpServers":{"ai-memory":{"url":"http://127.0.0.1:49374/mcp?flavor=moonshot","headers":{"X-Token":"t"}},"other":{"url":"http://x"}}}"#;
+        let (out, removed) = strip_mcp_json_client(
             content,
             McpClient::KimiCode,
             Some("ai-memory"),

@@ -30,7 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SubagentStop`, and `PreCompact`. Both paths honor `$KIMI_CODE_HOME`.
   Handoff injection happens at `SessionStart` through hook stdout, which Kimi
   Code appends to the model context; `setup-agent` and `uninstall` handle the
-  new agent like the other first-class integrations.
+  new agent like the other first-class integrations. The `install-mcp` entry
+  points at `/mcp?flavor=moonshot`: the Moonshot API validates tool parameter
+  schemas against a restricted dialect ("moonshot flavored json schema") that
+  rejects root-level `anyOf`/`oneOf`/`allOf` combinators — including the
+  `anyOf` on `memory_read_page` — and fails the whole session at `tools/list`.
+  Requests carrying that flavor receive flat tool schemas from the server;
+  every other client keeps receiving the upstream schemas unchanged.
+  `uninstall` matches the Kimi Code entry in either URL form, so removing an
+  install made before or after this change both work with the default
+  `--mcp-url`.
 - Grok Build CLI is now a first-class MCP client as well as a hook agent:
   `install-mcp --client grok` renders and `--apply` merges a native HTTP
   entry into `$GROK_HOME/config.toml` (default `~/.grok/config.toml`)

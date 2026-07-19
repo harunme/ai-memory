@@ -673,11 +673,21 @@ fn expand_grok_placeholders_with(
 }
 
 fn hook_server_url_from_mcp_url(url: &str) -> Option<String> {
-    let trimmed = url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
+    // Client-flavor query markers (Kimi Code's `?flavor=moonshot`) must
+    // not leak into the hook URL: hooks POST to `<origin>/hook`, so the
+    // inferred base needs query/fragment dropped BEFORE the `/mcp`
+    // suffix peel below — otherwise the suffix never matches and the
+    // whole `/mcp?flavor=...` tail would be baked into hook commands.
+    let base = url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    if base.is_empty() {
         return None;
     }
-    Some(trimmed.strip_suffix("/mcp").unwrap_or(trimmed).to_string())
+    Some(base.strip_suffix("/mcp").unwrap_or(base).to_string())
 }
 
 fn bearer_token_from_header(header: &str) -> Option<String> {
@@ -3673,6 +3683,69 @@ mod tests {
             Some("http://homelab:49374")
         );
         assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
+    }
+
+    /// Kimi Code's mcp.json entry points at `/mcp?flavor=moonshot`
+    /// (Moonshot rejects root-level schema combinators). Inferring the
+    /// hook URL from that entry must strip BOTH the query marker and the
+    /// `/mcp` path — hooks POST to `<origin>/hook`, so a flavored or
+    /// `/mcp`-suffixed base would 404 every capture.
+    #[test]
+    fn kimi_code_mcp_inference_strips_flavor_query_and_mcp_path() {
+        let inferred = infer_json_mcp_config(
+            r#"{
+              "mcpServers": {
+                "ai-memory": {
+                  "url": "http://homelab:49374/mcp?flavor=moonshot",
+                  "headers": { "Authorization": "Bearer secret-token" }
+                }
+              }
+            }"#,
+            &["mcpServers", "ai-memory"],
+            "url",
+        )
+        .unwrap();
+
+        assert_eq!(
+            inferred.hook_server_url.as_deref(),
+            Some("http://homelab:49374")
+        );
+        assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn hook_server_url_from_mcp_url_strips_query_and_suffix() {
+        for (input, expected) in [
+            ("http://homelab:49374/mcp", Some("http://homelab:49374")),
+            ("http://homelab:49374", Some("http://homelab:49374")),
+            ("http://homelab:49374/", Some("http://homelab:49374")),
+            (
+                "http://homelab:49374/mcp?flavor=moonshot",
+                Some("http://homelab:49374"),
+            ),
+            (
+                "http://homelab:49374/mcp/?flavor=moonshot",
+                Some("http://homelab:49374"),
+            ),
+            // A reverse-proxy prefix survives — hooks then POST to
+            // `<prefix>/hook` under it (base_path handling).
+            (
+                "http://homelab:49374/wiki/mcp",
+                Some("http://homelab:49374/wiki"),
+            ),
+            (
+                "http://homelab:49374/wiki/mcp?flavor=moonshot",
+                Some("http://homelab:49374/wiki"),
+            ),
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(
+                hook_server_url_from_mcp_url(input).as_deref(),
+                expected,
+                "input: {input:?}"
+            );
+        }
     }
 
     #[test]

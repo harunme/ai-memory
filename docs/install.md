@@ -580,7 +580,11 @@ so those events are still captured. A payload-provided value always wins.
 
 Kimi Code keeps MCP servers in `~/.kimi-code/mcp.json` and lifecycle hooks in
 `~/.kimi-code/config.toml`; both move together when `$KIMI_CODE_HOME` is set.
-The CLI also accepts `--agent kimi` as an alias.
+The CLI also accepts `--agent kimi` as an alias. `install-mcp` writes the
+server URL with a `?flavor=moonshot` query because the Moonshot API rejects
+root-level `anyOf`/`oneOf`/`allOf` in tool parameter schemas ("moonshot
+flavored json schema") — the ai-memory server answers flavored requests with
+flat schemas, and all other clients keep the upstream shape.
 
 ```bash
 ai-memory install-mcp --client kimi-code --apply \

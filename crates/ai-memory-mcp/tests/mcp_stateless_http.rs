@@ -26,6 +26,7 @@ use tower::ServiceExt;
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;
 const TOOLS_CALL_STATUS: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_status","arguments":{}}}"#;
+const TOOLS_LIST: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}"#;
 
 /// Build a `/mcp` router exactly like `serve.rs` does, toggling stateful
 /// mode. Returns the `Store` too so the writer actor stays alive for the
@@ -58,9 +59,15 @@ async fn make_router(tmp: &TempDir, stateful: bool) -> (Router, Store) {
 /// Streamable HTTP client sends (both JSON and event-stream), and no
 /// session id.
 fn post(body: &'static str) -> Request<Body> {
+    post_to("/mcp", body)
+}
+
+/// Same as [`post`] but against an explicit URI, so tests can carry the
+/// `?flavor=moonshot` marker Kimi Code's installed URL uses.
+fn post_to(uri: &str, body: &'static str) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri("/mcp")
+        .uri(uri)
         // rmcp's DNS-rebinding guard rejects a missing/disallowed Host with
         // 400; `localhost` is in the default allowlist. Real HTTP clients
         // always send Host — oneshot does not, so set it explicitly.
@@ -157,5 +164,76 @@ async fn stateful_tools_call_without_session_is_rejected() {
     assert!(
         body.contains("initialize"),
         "stateful rejection should mention the missing initialize: {body}"
+    );
+}
+
+/// Extract `memory_read_page`'s inputSchema from a tools/list JSON-RPC
+/// response body — the one tool whose root `anyOf` (issue #155) decides
+/// whether a Moonshot-flavored client can list tools at all.
+fn read_page_input_schema(body: &str) -> serde_json::Value {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .unwrap_or_else(|e| panic!("tools/list response must be JSON, got: {body}\nerr: {e}"));
+    let tools = json["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing result.tools: {body}"));
+    tools
+        .iter()
+        .find(|tool| tool["name"] == "memory_read_page")
+        .unwrap_or_else(|| panic!("memory_read_page missing from tools/list: {body}"))[
+        "inputSchema"
+    ]
+    .clone()
+}
+
+/// The real Kimi Code flow: `initialize` and `tools/list` as independent
+/// POSTs (stateless — no session id) against `/mcp?flavor=moonshot`, the
+/// URL `install-mcp --client kimi-code` writes. The Moonshot API rejects
+/// tool parameter schemas with root-level `anyOf`/`oneOf`/`allOf`, so
+/// the flavored tools/list must return `memory_read_page` without them
+/// while keeping the rest of the schema intact.
+#[tokio::test]
+async fn stateless_moonshot_flavor_strips_root_any_of() {
+    let tmp = TempDir::new().unwrap();
+    let (router, _store) = make_router(&tmp, false).await;
+
+    let init = router
+        .clone()
+        .oneshot(post_to("/mcp?flavor=moonshot", INITIALIZE))
+        .await
+        .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+
+    let resp = router
+        .oneshot(post_to("/mcp?flavor=moonshot", TOOLS_LIST))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let schema = read_page_input_schema(&body_string(resp).await);
+    for key in ["anyOf", "oneOf", "allOf"] {
+        assert!(
+            schema.get(key).is_none(),
+            "moonshot flavor must strip root `{key}`: {schema}"
+        );
+    }
+    assert!(
+        schema.get("properties").is_some(),
+        "the flat schema must keep describing the args: {schema}"
+    );
+}
+
+/// Control: without the flavor marker the SAME tools/list keeps the
+/// upstream schema shape, root `anyOf` included — every other client is
+/// unaffected by the Kimi Code workaround.
+#[tokio::test]
+async fn stateless_tools_list_without_flavor_keeps_root_any_of() {
+    let tmp = TempDir::new().unwrap();
+    let (router, _store) = make_router(&tmp, false).await;
+
+    let resp = router.oneshot(post(TOOLS_LIST)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let schema = read_page_input_schema(&body_string(resp).await);
+    assert!(
+        schema.get("anyOf").is_some(),
+        "unflavored tools/list must keep the upstream root anyOf: {schema}"
     );
 }

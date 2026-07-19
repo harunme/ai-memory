@@ -19,9 +19,13 @@ use ai_memory_wiki::{Wiki, WikiError, WritePageRequest};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, Content, Implementation, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::{ErrorData as McpError, ServerHandler, schemars, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{
+    ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
+};
 use serde::{Deserialize, Serialize};
 
 const HANDOFF_SUMMARY_MAX_CHARS: usize = 3_000;
@@ -655,6 +659,11 @@ struct ExploreArgs {
 // `required` with `path: null` and still hit the runtime error. Encoding
 // it here lets schema-respecting clients refuse the invalid call before
 // it ever reaches the server.
+//
+// NOTE(kimi-code): Moonshot ("moonshot flavored json schema") rejects
+// this root-level `anyOf`, so Kimi Code sessions get a patched schema
+// without it — see `moonshot_safe_tool_list`. Every other client keeps
+// receiving this exact shape.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[schemars(extend("anyOf" = [
     {"required": ["path"], "properties": {"path": {"type": "string"}}},
@@ -2519,6 +2528,68 @@ impl ServerHandler for AiMemoryServer {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(MEMORY_INSTRUCTIONS.to_string())
     }
+
+    // Declaring `list_tools` here makes the `#[tool_handler]` macro skip
+    // its generated version (rmcp-macros only emits methods that are
+    // missing), so the flavor patch below runs on every tools/list.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let tools = self.tool_router.list_all();
+        // rmcp's streamable-HTTP transport injects the request's
+        // `http::request::Parts` into the extensions of every request in
+        // both stateless and stateful modes, which is how the flavor
+        // marker survives even when no peer clientInfo is available.
+        let moonshot = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.uri.query())
+            .is_some_and(|query| query.split('&').any(|pair| pair == "flavor=moonshot"));
+        if moonshot {
+            Ok(ListToolsResult::with_all_items(moonshot_safe_tool_list(
+                tools,
+            )))
+        } else {
+            Ok(ListToolsResult::with_all_items(tools))
+        }
+    }
+}
+
+/// Moonshot ("moonshot flavored json schema") rejects any root-level
+/// `anyOf`/`oneOf`/`allOf` in tool parameter schemas — the `anyOf` that
+/// issue #155 added to `memory_read_page` included — failing the whole
+/// session with a 400 at `tools/list` time. Requests carrying the
+/// `?flavor=moonshot` marker (the URL `install-mcp --client kimi-code`
+/// writes) therefore get a copy of the tool list with those three
+/// root keys stripped; nested combinators are left alone because the
+/// rejection is specific to the schema root, and every other client
+/// keeps receiving the exact upstream shape.
+///
+/// The path/query contract that `anyOf` encoded stays enforced by the
+/// runtime handler validation, and the field descriptions still spell
+/// it out — the guard loss is confined to the one client that cannot
+/// parse it.
+fn moonshot_safe_tool_list(tools: Vec<Tool>) -> Vec<Tool> {
+    const ROOT_COMBINATORS: [&str; 3] = ["anyOf", "oneOf", "allOf"];
+    tools
+        .into_iter()
+        .map(|mut tool| {
+            if !ROOT_COMBINATORS
+                .iter()
+                .any(|key| tool.input_schema.contains_key(*key))
+            {
+                return tool;
+            }
+            let mut schema = (*tool.input_schema).clone();
+            for key in ROOT_COMBINATORS {
+                schema.shift_remove(key);
+            }
+            tool.input_schema = Arc::new(schema);
+            tool
+        })
+        .collect()
 }
 
 impl AiMemoryServer {
@@ -4468,6 +4539,67 @@ mod tests {
                  clients cannot satisfy it"
             );
         }
+    }
+
+    // Kimi Code: Moonshot rejects root-level combinators in tool
+    // parameter schemas ("moonshot flavored json schema"), so requests
+    // marked `?flavor=moonshot` get a patched tool list. Pins what the
+    // patch strips and — just as important — what it preserves.
+    #[test]
+    fn moonshot_safe_tool_list_strips_root_combinators_only() {
+        let schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "title": "ReadPageArgs",
+                "type": "object",
+                "description": "Read one wiki page.",
+                "properties": {
+                    "path": { "type": "string", "description": "Exact wiki path" },
+                    // A NESTED combinator must survive: Moonshot's
+                    // rejection is specific to the schema root.
+                    "query": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+                },
+                "anyOf": [{ "required": ["path"] }, { "required": ["query"] }],
+                "oneOf": [{ "required": ["path"] }],
+                "allOf": [{ "required": ["query"] }]
+            }))
+            .unwrap();
+        let tool = Tool::new("memory_read_page", "Read a wiki page", schema);
+
+        let patched = moonshot_safe_tool_list(vec![tool]);
+        let out = &patched[0].input_schema;
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            assert!(
+                !out.contains_key(key),
+                "root `{key}` must be stripped: {out:?}"
+            );
+        }
+        for key in ["$schema", "title", "type", "description", "properties"] {
+            assert!(out.contains_key(key), "root `{key}` must survive: {out:?}");
+        }
+        assert_eq!(
+            out["properties"]["query"]["anyOf"],
+            serde_json::json!([{ "type": "string" }, { "type": "null" }]),
+            "nested combinators are out of scope for the patch"
+        );
+    }
+
+    #[test]
+    fn moonshot_safe_tool_list_leaves_flat_tools_untouched() {
+        let schema: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "type": "object",
+                "properties": { "verbose": { "type": "boolean" } }
+            }))
+            .unwrap();
+        let tool = Tool::new("memory_status", "Status counts", schema);
+        let before = serde_json::to_value(&tool).unwrap();
+
+        let patched = moonshot_safe_tool_list(vec![tool]);
+        let after = serde_json::to_value(&patched[0]).unwrap();
+
+        assert_eq!(before, after, "flat tools must pass through unchanged");
     }
 
     // Issue #155: the neither-arg error must teach a looping model what a

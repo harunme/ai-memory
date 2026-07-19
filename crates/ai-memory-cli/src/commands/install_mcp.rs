@@ -348,6 +348,29 @@ fn render_json_mcp_fragment(args: &InstallMcpArgs) -> Result<String> {
     Ok(serde_json::to_string_pretty(&fragment)?)
 }
 
+/// Append the `flavor=moonshot` marker to the MCP endpoint URL written
+/// into Kimi Code's mcp.json. Moonshot's API validates tool parameter
+/// schemas against a restricted JSON Schema dialect ("moonshot flavored
+/// json schema") that rejects root-level `anyOf`/`oneOf`/`allOf` —
+/// including the `anyOf` issue #155 put on `memory_read_page` — and
+/// fails the whole session with a 400 at `tools/list`. The ai-memory
+/// server answers requests carrying this flavor with flat schemas;
+/// every other client keeps the upstream shape. Idempotent so a
+/// re-run (or a user-pasted already-flavored `--server-url`) doesn't
+/// stack duplicate query pairs.
+pub(crate) fn moonshot_flavored_mcp_url(server_url: &str) -> String {
+    const FLAVOR: &str = "flavor=moonshot";
+    let url = server_url.trim();
+    let already_marked = url
+        .split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|pair| pair == FLAVOR));
+    if already_marked {
+        return url.to_string();
+    }
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{FLAVOR}")
+}
+
 /// JSON entry shape used by Claude Code, Claude Desktop, Cursor, and
 /// Gemini CLI — they all accept `mcpServers.<name>` with `url` or
 /// `httpUrl` plus optional `headers`. Returns the per-client variant.
@@ -415,8 +438,11 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
         McpClient::KimiCode => {
             // Kimi Code treats an entry with `url` and no `transport`
             // field as streamable-HTTP; `transport` is only for legacy
-            // SSE endpoints.
-            entry.insert("url".into(), json!(server_url));
+            // SSE endpoints. The URL carries `flavor=moonshot` because
+            // the Moonshot API rejects root-level schema combinators
+            // (the `anyOf` on `memory_read_page`, issue #155) — the
+            // server answers flavored requests with flat schemas.
+            entry.insert("url".into(), json!(moonshot_flavored_mcp_url(server_url)));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
@@ -856,6 +882,9 @@ fn render_kimi_code(args: &InstallMcpArgs) -> Result<String> {
          #\n\
          # An entry with `url` and no `transport` field is a streamable-HTTP\n\
          # server; `transport` is only needed for legacy SSE endpoints.\n\
+         # The URL carries `?flavor=moonshot` because the Moonshot API rejects\n\
+         # root-level `anyOf`/`oneOf`/`allOf` in tool parameter schemas;\n\
+         # ai-memory serves flat schemas to requests with this flavor.\n\
          {snippet}\n",
         snippet = render_json_mcp_fragment(args)?,
     ))
@@ -1159,9 +1188,13 @@ mod tests {
         // Kimi Code: `url` with NO `transport` field means streamable-HTTP
         // (`transport` is legacy-SSE-only there), and the URL key is plain
         // `url` — not Gemini's `httpUrl` or Antigravity's `serverUrl`.
+        // The URL must pin `flavor=moonshot`: the Moonshot API rejects
+        // root-level combinators in tool parameter schemas, so Kimi's
+        // tools/list needs the server's flat-schema response.
         let kimi = render_for_test(McpClient::KimiCode);
         assert!(kimi.contains("\"mcpServers\""));
         assert!(kimi.contains("\"url\""));
+        assert!(kimi.contains("http://127.0.0.1:49374/mcp?flavor=moonshot"));
         assert!(!kimi.contains("\"transport\""));
         assert!(!kimi.contains("\"httpUrl\""));
         assert!(!kimi.contains("\"serverUrl\""));
@@ -1192,6 +1225,42 @@ mod tests {
         // An empty override falls back to the default home-based dir.
         assert_eq!(kimi_code_home(Some("".into())).unwrap(), default);
         assert_eq!(kimi_code_home(None).unwrap(), default);
+    }
+
+    /// The `flavor=moonshot` marker is what makes the server answer Kimi
+    /// Code's tools/list with flat (Moonshot-compatible) schemas. Pin the
+    /// append rules: `?` for a bare endpoint, `&` when a query already
+    /// exists, and never duplicate a marker that is already there.
+    #[test]
+    fn moonshot_flavored_mcp_url_appends_marker_idempotently() {
+        for (input, expected) in [
+            (
+                "http://127.0.0.1:49374/mcp",
+                "http://127.0.0.1:49374/mcp?flavor=moonshot",
+            ),
+            (
+                "http://homelab:49374/mcp?token=abc",
+                "http://homelab:49374/mcp?token=abc&flavor=moonshot",
+            ),
+            // A re-run (or user-pasted already-flavored --server-url)
+            // must not stack a second marker.
+            (
+                "http://127.0.0.1:49374/mcp?flavor=moonshot",
+                "http://127.0.0.1:49374/mcp?flavor=moonshot",
+            ),
+            (
+                "http://homelab:49374/mcp?token=abc&flavor=moonshot",
+                "http://homelab:49374/mcp?token=abc&flavor=moonshot",
+            ),
+            // A marker mentioned inside another pair's VALUE is not the
+            // marker itself — match whole query pairs only.
+            (
+                "http://homelab:49374/mcp?note=flavor=moonshot",
+                "http://homelab:49374/mcp?note=flavor=moonshot&flavor=moonshot",
+            ),
+        ] {
+            assert_eq!(moonshot_flavored_mcp_url(input), expected, "input: {input}");
+        }
     }
 
     #[test]

@@ -596,12 +596,21 @@ which merges:
 {
   "mcpServers": {
     "ai-memory": {
-      "url": "http://homelab:49374/mcp",
+      "url": "http://homelab:49374/mcp?flavor=moonshot",
       "headers": { "Authorization": "Bearer <token>" }
     }
   }
 }
 ```
+
+`install-mcp` appends the `?flavor=moonshot` query itself (idempotently, so
+re-runs don't duplicate it). The Moonshot API validates tool parameter
+schemas against a restricted dialect ("moonshot flavored json schema") that
+rejects root-level `anyOf`/`oneOf`/`allOf` combinators — including the
+`anyOf` on `memory_read_page` — and fails the whole session with a 400 at
+`tools/list`. The ai-memory server answers requests carrying this flavor
+with flat schemas; every other client keeps receiving the upstream schemas
+unchanged.
 
 **Config file (hooks):** `~/.kimi-code/config.toml` (same `$KIMI_CODE_HOME`
 base). Kimi Code stores hooks as `[[hooks]]` array entries in the same TOML
@@ -626,6 +635,9 @@ same pattern as Gemini CLI.
 **Gotchas:**
 - Do not add a `transport` field for HTTP servers: `url` alone means
   streamable HTTP; `transport: "sse"` selects the legacy SSE transport.
+- Do not strip the `?flavor=moonshot` query from the installed URL: without
+  it the Moonshot API rejects `memory_read_page`'s root `anyOf` and every
+  session fails at `tools/list`.
 - Hook entries accept only `event`, `matcher`, `command`, and `timeout`
   (seconds, 1-600, default 30). Any extra field makes Kimi Code fail to load
   the entire `config.toml`, so prefer `install-hooks --apply` over hand

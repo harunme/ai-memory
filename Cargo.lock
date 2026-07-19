@@ -189,6 +189,7 @@ dependencies = [
  "async-trait",
  "axum",
  "flate2",
+ "http",
  "jiff",
  "rmcp",
  "schemars",
