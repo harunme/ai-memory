@@ -91,8 +91,9 @@ SCRIPTS=(
     "session-end"
 )
 
-# kimi-code mirrors the claude-code bundle, which also captures the
-# subagent lifecycle events.
+# kimi-code hooks also cover the subagent lifecycle: its on-disk bundle
+# mirrors hooks/claude-code/ (which ships subagent-start/stop), while the
+# default SCRIPTS list above omits them — so they are appended only here.
 if [[ "$AGENT" == "kimi-code" ]]; then
     SCRIPTS+=("subagent-start" "subagent-stop")
 fi
