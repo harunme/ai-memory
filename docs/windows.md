@@ -275,6 +275,12 @@ large-backlog instances can raise them with whole-minute overrides. Unlike
 `AI_MEMORY_HOOK_PLATFORM`, these are read by the hook **at runtime**, so they
 apply to the agent's environment (no re-`install-hooks` needed):
 
+Native hooks accept well-formed JSON with or without one leading UTF-8 BOM, as
+some PowerShell pipelines add that marker when writing to a native process. Any
+other malformed stdin is not spooled or sent; the hook prints a fixed warning
+to stderr, returns `{}` on stdout, and exits successfully so it cannot break the
+host agent. The warning never includes payload contents.
+
 | Env var | Built-in default | Max override | What it caps |
 |---|---:|---:|---|
 | `AI_MEMORY_HOOK_DRAIN_TIMEOUT_MINUTES` | 3 seconds | 60 minutes | each event POST during a drain |

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Native lifecycle hooks now accept one leading UTF-8 BOM on JSON stdin, which
+  covers PowerShell pipelines on Windows. Other malformed payloads are dropped
+  before spool or network delivery with a bounded content-free stderr warning;
+  hooks still return `{}` and exit successfully ([#197]).
+
 ## [1.15.0] - 2026-07-19
 
 ### Added

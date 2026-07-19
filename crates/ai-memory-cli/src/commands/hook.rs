@@ -297,7 +297,7 @@ pub async fn run(data_dir: Option<PathBuf>, args: HookArgs) -> anyhow::Result<()
 async fn run_with_payload<W, S>(
     data_dir: Option<PathBuf>,
     args: HookArgs,
-    mut payload: String,
+    payload: String,
     stdout: &mut W,
     spawn_background_drainer: S,
 ) -> anyhow::Result<()>
@@ -305,8 +305,16 @@ where
     W: std::io::Write,
     S: FnOnce(&Path) -> std::io::Result<()>,
 {
-    let mut json: serde_json::Value =
-        serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+    let (mut payload, mut json) = match parse_hook_payload(payload) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            eprintln!(
+                "ai-memory hook warning: could not parse event payload as JSON; nothing was captured"
+            );
+            writeln!(stdout, "{{}}")?;
+            return Ok(());
+        }
+    };
     let (policy_cwd, canonical_session_id) = hook_context(&args.agent, &json);
     let policy = policy_cwd.as_deref().map(capture_policy);
     let tool_event = is_tool_event(&args.event);
@@ -466,6 +474,14 @@ where
 
     writeln!(stdout, "{{}}")?;
     Ok(())
+}
+
+fn parse_hook_payload(mut payload: String) -> serde_json::Result<(String, serde_json::Value)> {
+    if payload.starts_with('\u{feff}') {
+        payload.drain(..'\u{feff}'.len_utf8());
+    }
+    let json = serde_json::from_str(&payload)?;
+    Ok((payload, json))
 }
 
 fn hook_context(agent: &str, raw: &serde_json::Value) -> (Option<String>, Option<String>) {
