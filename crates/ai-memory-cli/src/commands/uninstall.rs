@@ -442,7 +442,9 @@ fn apply_change(change: &PlannedChange, name: Option<&str>, url: &str) -> anyhow
                         }
                         RewriteOp::ZeroHooksJson => strip_zero_hooks(&out)?.new_content,
                         RewriteOp::KimiCodeHooksToml => strip_kimi_code_hooks(&out)?.new_content,
-                        RewriteOp::McpJson(client) => strip_mcp_json(&out, client, name, url)?.0,
+                        RewriteOp::McpJson(client) => {
+                            strip_mcp_json_client(&out, client, name, url)?.0
+                        }
                         RewriteOp::McpToml => strip_mcp_toml(&out, name, url)?.0,
                     };
                 }
@@ -1877,6 +1879,37 @@ command = "'/usr/local/bin/ai-memory' hook --event stop --agent kimi-code --serv
         .unwrap();
         assert_eq!(removed, vec!["ai-memory".to_string()]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mcpServers"].get("ai-memory").is_none());
+        assert!(v["mcpServers"].get("other").is_some());
+    }
+
+    /// The plan matched the flavored Kimi Code entry but apply dispatched
+    /// the unflavored stripper — the CLI reported success and left the
+    /// entry behind. Drive `apply_change` with the exact URL install-mcp
+    /// writes so plan and apply can never diverge again.
+    #[test]
+    fn apply_change_removes_kimi_code_flavored_mcp_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"ai-memory":{"url":"http://127.0.0.1:49374/mcp?flavor=moonshot"},"other":{"url":"http://x"}}}"#,
+        )
+        .unwrap();
+
+        apply_change(
+            &PlannedChange::Rewrite {
+                path: path.clone(),
+                removed: vec!["ai-memory".to_string()],
+                ops: vec![RewriteOp::McpJson(McpClient::KimiCode)],
+            },
+            Some("ai-memory"),
+            "http://127.0.0.1:49374/mcp",
+        )
+        .unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(v["mcpServers"].get("ai-memory").is_none());
         assert!(v["mcpServers"].get("other").is_some());
     }
