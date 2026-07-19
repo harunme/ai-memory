@@ -145,7 +145,63 @@ function captureNormalize(path: string): { path: string; windows: boolean } | un
 function captureJoin(base: string, child: string): string { if (/^[^A-Za-z]?:|^[A-Za-z]:[^/\\]/.test(child)) return child; return `${base.replace(/[\\/]+$/, "")}/${child}`; }
 function captureValidGlob(p: string): boolean { return !!p && [...p].length <= CAPTURE_MAX_PATTERN_CHARS && !/[!{}\[\]()|^$%]/.test(p) && !p.includes("${") && !p.includes("***") && !p.replace(/\\/g, "/").split("/").includes("..") && (!p.startsWith("~") || p.startsWith("~/")) && !/^[^A-Za-z]?:/.test(p) && !/^[A-Za-z]:[^/\\]/.test(p); }
 function captureParseArray(value: string): string[] | undefined { let i = 0; const out: string[] = []; const ws = () => { while (/\s/.test(value[i] ?? "")) i++; }; const basic = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", '"': '"', "\\": "\\" } as Record<string, string>; ws(); if (value[i++] !== "[") return undefined; for (;;) { ws(); if (value[i] === "]") { i++; ws(); return i === value.length ? out : undefined; } const quote = value[i++]; if (quote !== '"' && quote !== "'") return undefined; let s = ""; for (;;) { if (i >= value.length) return undefined; const c = value[i++]; if (c === quote) break; if (c === "\\" && quote === '"') { const e = value[i++]; if (e in basic) s += basic[e]; else if (e === "u" || e === "U") { const count = e === "u" ? 4 : 8; const hex = value.slice(i, i + count); if (!new RegExp(`^[0-9A-Fa-f]{${count}}$`).test(hex)) return undefined; const n = Number.parseInt(hex, 16); if (n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) return undefined; s += String.fromCodePoint(n); i += count; } else return undefined; } else if (c === "\n" || c === "\r") return undefined; else s += c; } out.push(s); ws(); if (value[i] === ",") { i++; continue; } if (value[i] === "]") continue; return undefined; } }
-function captureConfig(cwd: string | undefined): CaptureConfig { const marker = findMarker(cwd); const fallback = captureNormalize(cwd ?? "")?.path ?? ""; if (!marker) return { state: "inactive", patterns: [], base: fallback }; try { const bytes = readFileSync(marker); const base = captureNormalize(dirname(marker))?.path ?? fallback; if (bytes.byteLength > CAPTURE_MARKER_MAX_BYTES) return { state: "invalid", patterns: [], base }; let section = ""; let value = ""; let collecting = false; let seen = false; for (const raw of bytes.toString("utf8").split(/\r?\n/)) { const line = captureTrimComment(raw).trim(); if (!line) continue; const table = /^\[([^\]]+)\]$/.exec(line); if (table) { if (collecting) return { state: "invalid", patterns: [], base }; section = table[1]; continue; } if (section !== "capture") continue; if (!seen) { const kv = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/.exec(line); if (!kv || kv[1] !== "ignore_paths") return { state: "invalid", patterns: [], base }; seen = true; value = kv[2]; collecting = !value.includes("]"); } else if (collecting) { value += ` ${line}`; collecting = !value.includes("]"); } else return { state: "invalid", patterns: [], base }; } if (collecting) return { state: "invalid", patterns: [], base }; if (!seen) return { state: "inactive", patterns: [], base }; const strings = captureParseArray(value); if (!strings || strings.length > CAPTURE_MAX_PATTERNS) return { state: "invalid", patterns: [], base }; const home = homedir(); const patterns = strings.map((source) => { if (!captureValidGlob(source)) return undefined; const expanded = source.startsWith("~/") ? captureJoin(home, source.slice(2)) : /^(?:\/|\\\\|[A-Za-z]:[\\/])/.test(source) ? source : captureJoin(base, source); const normalized = captureNormalize(expanded); if (!normalized) return undefined; return { path: normalized.path, windows: normalized.windows, directory: normalized.path.endsWith("/**") ? (normalized.path.slice(0, -3) || "/") : undefined }; }); if (patterns.some((p) => !p)) return { state: "invalid", patterns: [], base }; return patterns.length ? { state: "active", patterns: patterns as CaptureConfig["patterns"], base } : { state: "inactive", patterns: [], base }; } catch (_e) { return { state: "invalid", patterns: [], base: fallback }; } }
+function captureConfig(cwd: string | undefined): CaptureConfig {
+  const marker = findMarker(cwd);
+  const candidateBase = captureNormalize(cwd ? resolve(cwd) : "")?.path ?? "";
+  if (!marker) return { state: "inactive", patterns: [], base: candidateBase };
+  try {
+    const bytes = readFileSync(marker);
+    const markerBase = captureNormalize(dirname(marker))?.path ?? candidateBase;
+    if (bytes.byteLength > CAPTURE_MARKER_MAX_BYTES) return { state: "invalid", patterns: [], base: candidateBase };
+    let section = "";
+    let value = "";
+    let collecting = false;
+    let seen = false;
+    for (const raw of bytes.toString("utf8").split(/\r?\n/)) {
+      const line = captureTrimComment(raw).trim();
+      if (!line) continue;
+      const table = /^\[([^\]]+)\]$/.exec(line);
+      if (table) {
+        if (collecting) return { state: "invalid", patterns: [], base: candidateBase };
+        section = table[1];
+        continue;
+      }
+      if (section !== "capture") continue;
+      if (!seen) {
+        const kv = /^([A-Za-z0-9_-]+)\s*=\s*(.*)$/.exec(line);
+        if (!kv || kv[1] !== "ignore_paths") return { state: "invalid", patterns: [], base: candidateBase };
+        seen = true;
+        value = kv[2];
+        collecting = !value.includes("]");
+      } else if (collecting) {
+        value += ` ${line}`;
+        collecting = !value.includes("]");
+      } else return { state: "invalid", patterns: [], base: candidateBase };
+    }
+    if (collecting) return { state: "invalid", patterns: [], base: candidateBase };
+    if (!seen) return { state: "inactive", patterns: [], base: candidateBase };
+    const strings = captureParseArray(value);
+    if (!strings || strings.length > CAPTURE_MAX_PATTERNS) return { state: "invalid", patterns: [], base: candidateBase };
+    const home = homedir();
+    const patterns = strings.map((source) => {
+      if (!captureValidGlob(source)) return undefined;
+      const expanded = source.startsWith("~/")
+        ? captureJoin(home, source.slice(2))
+        : /^(?:\/|\\\\|[A-Za-z]:[\\/])/.test(source)
+          ? source
+          : captureJoin(markerBase, source);
+      const normalized = captureNormalize(expanded);
+      if (!normalized) return undefined;
+      return { path: normalized.path, windows: normalized.windows, directory: normalized.path.endsWith("/**") ? (normalized.path.slice(0, -3) || "/") : undefined };
+    });
+    if (patterns.some((p) => !p)) return { state: "invalid", patterns: [], base: candidateBase };
+    return patterns.length
+      ? { state: "active", patterns: patterns as CaptureConfig["patterns"], base: candidateBase }
+      : { state: "inactive", patterns: [], base: candidateBase };
+  } catch (_e) {
+    return { state: "invalid", patterns: [], base: candidateBase };
+  }
+}
 function captureGlob(pattern: string, candidate: string, insensitive: boolean, budget: { work: number }): boolean | undefined { const p = [...pattern]; const c = [...candidate]; const eq = (a: string, b: string) => insensitive && a.charCodeAt(0) < 128 && b.charCodeAt(0) < 128 ? a.toLowerCase() === b.toLowerCase() : a === b; const previous = new Array<boolean>(p.length + 1).fill(false); previous[0] = true; for (let j = 1; j <= p.length; j++) previous[j] = p[j - 1] === "*" && p[j] !== "*" && previous[j - 1]; for (const ch of c) { const current = new Array<boolean>(p.length + 1).fill(false); for (let j = 1; j <= p.length; j++) { if (++budget.work > CAPTURE_MAX_WORK) return undefined; const x = p[j - 1]; current[j] = x === "*" && p[j] === "*" ? false : x === "*" && j >= 2 && p[j - 2] === "*" ? current[j - 2] || previous[j] : x === "*" ? current[j - 1] || (ch !== "/" && previous[j]) : x === "?" ? ch !== "/" && previous[j - 1] : eq(x, ch) && previous[j - 1]; } for (let j = 0; j <= p.length; j++) previous[j] = current[j]; } return previous[p.length]; }
 function captureTool(payload: Record<string, unknown>): { family: CaptureProtocol["tool_family"]; paths?: string[]; extraction: CaptureProtocol["extraction_state"]; callID?: string } { const name = typeof payload.tool === "string" ? payload.tool.toLowerCase() : ""; const args = payload.args as Record<string, unknown> | undefined; const call = ["tool_use_id","toolUseId","tool_call_id","toolCallId","call_id","callId","callID"].map((k) => payload[k]).find((v): v is string => typeof v === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(v)); if (["search","grep","glob","find","list","ls","list_files","read_dir"].includes(name)) return { family: "search-list", extraction: "not-applicable", callID: call }; if (["bash","shell","execute","run_command","web_search"].includes(name)) return { family: "non-file", extraction: "extracted", callID: call }; if (!["read","write","edit","apply_patch","notebookedit","notebook_edit","create_file","delete_file","rename_file","move_file","multi_edit","multiedit","replace","replace_all"].includes(name)) return { family: "unknown", extraction: "extracted", callID: call }; const direct = (o: any): string[] | undefined => { if (!o || typeof o !== "object") return undefined; const r: string[] = []; for (const k of ["file_path","filePath","path","absolute_path","AbsolutePath","notebook_path"]) if (k in o) { if (typeof o[k] !== "string") return undefined; r.push(o[k]); } if ("paths" in o) { if (!Array.isArray(o.paths) || o.paths.some((x: unknown) => typeof x !== "string")) return undefined; r.push(...o.paths); } return r.length && r.length <= CAPTURE_MAX_CANDIDATES ? r : undefined; }; let paths = direct(args); if (["multi_edit","multiedit","replace_all"].includes(name)) { const entries = args?.edits ?? args?.replacements; if (!Array.isArray(entries) || !entries.length || entries.length > CAPTURE_MAX_CANDIDATES) paths = undefined; else { paths = paths ?? []; for (const entry of entries) { const more = direct(entry); if (!more || paths.length + more.length > CAPTURE_MAX_CANDIDATES) { paths = undefined; break; } paths.push(...more); } } } if (!paths || paths.some((p) => !p.trim() || [...p].length > CAPTURE_MAX_PATH_CHARS)) return { family: "file", extraction: "missing-or-malformed", callID: call }; return { family: "file", paths, extraction: "extracted", callID: call }; }
 function capturePolicy(payload: Record<string, unknown>, cwd: string | undefined): { disposition: CaptureDisposition; protocol?: CaptureProtocol; payload: Record<string, unknown> } { const config = captureConfig(cwd); const tool = captureTool(payload); let disposition: CaptureDisposition = "keep"; if (config.state === "invalid" && tool.family === "file") disposition = "metadata-only"; else if (config.state === "active" && tool.family === "search-list") disposition = "drop"; else if (config.state === "active" && tool.family === "file") { if (!tool.paths) disposition = "metadata-only"; else { const candidates = tool.paths.map((p) => captureNormalize(/^(?:\/|\\\\|[A-Za-z]:[\\/])/.test(p) ? p : captureJoin(config.base, p))); if (candidates.some((p) => !p)) disposition = "metadata-only"; else { const budget = { work: 0 }; captureMatch: for (const candidate of candidates as { path: string; windows: boolean }[]) for (const pattern of config.patterns) { if (candidate.windows !== pattern.windows) continue; if (pattern.directory && captureGlob(pattern.directory, candidate.path, pattern.windows, budget)) { disposition = "drop"; break captureMatch; } const match = captureGlob(pattern.path, candidate.path, pattern.windows, budget); if (match === undefined) { disposition = "metadata-only"; break; } if (match) { disposition = "drop"; break captureMatch; } } } } } if (config.state === "inactive") return { disposition, payload }; const protocol: CaptureProtocol = { version: CAPTURE_POLICY_V1, disposition, policy_state: config.state, tool_family: tool.family, path_count: tool.paths?.length ?? 0, extraction_state: tool.extraction }; if (disposition === "metadata-only") { const session = payload.sessionID ?? payload.sessionId ?? payload.session_id; const routing = typeof payload.cwd === "string" ? payload.cwd : cwd; return { disposition, protocol, payload: { ...(typeof session === "string" ? { session_id: session } : {}), ...(typeof routing === "string" ? { cwd: routing } : {}), tool_family: tool.family, tool_name: tool.family, ...(tool.callID ? { tool_call_id: tool.callID } : {}), _ai_memory_capture: protocol } }; } if (disposition === "keep") return { disposition, protocol, payload: { ...payload, _ai_memory_capture: protocol } }; return { disposition, protocol, payload }; }
@@ -1225,8 +1281,8 @@ mod tests {
         let fixture = include_str!("../../../ai-memory-hooks/tests/fixtures/capture-policy.json");
         let fixture = serde_json::to_string(fixture).unwrap();
         let source = format!(
-            r#"import {{ closeSync, openSync, readFileSync as readMarkerText, readSync, writeFileSync }} from "node:fs";
-import {{ dirname, join }} from "node:path";
+            r#"import {{ closeSync, mkdirSync, openSync, readFileSync as readMarkerText, readSync, writeFileSync }} from "node:fs";
+import {{ dirname, join, resolve }} from "node:path";
 import {{ homedir }} from "node:os";
 
 const fixtureText = {fixture};
@@ -1242,8 +1298,9 @@ const privateBody = "PRIVATE_BODY_SENTINEL";
 let serial = 0;
 function fail(label: string): never {{ throw new Error(`runtime evidence failed: ${{label}}`); }}
 function check(ok: unknown, label: string): asserts ok {{ if (!ok) fail(label); }}
-function marker(text: string, cwd = `/fixture/${{serial++}}`): string {{
-  const file = join(markerRoot, `marker-${{serial}}.toml`);
+function marker(text: string, cwd = join(markerRoot, `fixture-${{serial++}}`)): string {{
+  mkdirSync(cwd, {{ recursive: true }});
+  const file = join(cwd, ".ai-memory.toml");
   writeFileSync(file, text);
   markerFixtures.set(cwd, file);
   return cwd;
@@ -1266,6 +1323,14 @@ for (const vector of fixture.normalization) {{
   expectDecision({{ tool: "edit", args: {{ path: vector.candidate }} }}, cwd, vector.match ? "drop" : "keep", "file", "extracted", 1, "fixture-normalization");
 }}
 expectDecision({{ tool: "edit", args: {{ path: "private/item" }} }}, marker('[capture]\nignore_paths = ["private/**"]\n'), "drop", "file", "extracted", 1, "marker-relative");
+const nestedRoot = join(markerRoot, "nested-repo");
+const nestedCwd = join(nestedRoot, "subdir");
+mkdirSync(nestedCwd, {{ recursive: true }});
+const nestedMarker = join(nestedRoot, ".ai-memory.toml");
+writeFileSync(nestedMarker, '[capture]\nignore_paths = ["private/**"]\n');
+markerFixtures.set(nestedCwd, nestedMarker);
+expectDecision({{ tool: "edit", args: {{ path: "../private/item" }} }}, nestedCwd, "drop", "file", "extracted", 1, "nested-cwd-parent-private");
+expectDecision({{ tool: "edit", args: {{ path: "private/item" }} }}, nestedCwd, "keep", "file", "extracted", 1, "nested-cwd-local-public");
 expectDecision({{ tool: "edit", args: {{ path: `${{homedir()}}/home-private/item` }} }}, marker('[capture]\nignore_paths = ["~/home-private/**"]\n'), "drop", "file", "extracted", 1, "home-expansion");
 expectDecision({{ tool: "edit", args: {{ path: "case/item" }} }}, marker('[capture]\nignore_paths = ["Case/**"]\n'), "keep", "file", "extracted", 1, "posix-case");
 expectDecision({{ tool: "edit", args: {{ path: "c:/SECRET/item" }} }}, marker('[capture]\nignore_paths = ["C:/secret/**"]\n'), "drop", "file", "extracted", 1, "windows-drive-case");

@@ -137,8 +137,9 @@ keys, invalid types/globs/roots, unreadable markers, or a marker over 64 KiB
 invalidate the whole capture policy rather than partially applying it.
 
 Patterns match an entire lexically normalized path, not a substring. Use only
-`*`, `?`, and `**`; relative patterns are rooted at the marker directory and
-`~/` expands to the home directory. Prefer forward slashes on every platform.
+`*`, `?`, and `**`; relative patterns are rooted at the marker directory,
+relative file-tool paths are resolved from the event's actual `cwd`, and `~/`
+expands to the home directory. Prefer forward slashes on every platform.
 POSIX matching is case-sensitive; Windows drive/UNC matching is ASCII
 case-insensitive. Bounds are 128 patterns, 1,024 characters per pattern, 32
 direct candidates and 4,096 characters per candidate, and 1,000,000 bounded
