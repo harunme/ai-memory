@@ -1,8 +1,8 @@
 # Managed cross-harness workstreams
 
 `ai-memory run` is an opt-in launcher that lets one logical coding session move
-between Claude Code, Codex, OpenCode, Pi, and OMP. Direct agent launches keep
-their existing ai-memory behavior. There is no global mode toggle and no
+between Claude Code, Codex, OpenCode, Pi, Crush, and OMP. Direct agent launches
+keep their existing ai-memory behavior. There is no global mode toggle and no
 `switch` command: using `run` selects the current workstream and transparently
 creates or resumes the correct native session for the requested harness.
 
@@ -14,16 +14,18 @@ ai-memory run claude
 ai-memory run codex --yolo
 # return to Claude Code later; ai-memory supplies Claude's native --resume
 ai-memory run claude --model opus
+# or omit the harness and continue the newest usable session automatically
+ai-memory run
 ```
 
-Everything after the harness name is native argv. No `--` separator is needed,
-and ai-memory does not maintain a second copy of each harness's option schema.
-Wrapper options must come first:
+Everything after the harness name is native argv except the wrapper-owned exact
+flag `--yolo`. No `--` separator is needed, and ai-memory does not maintain a
+second copy of each harness's option schema. Other wrapper options come first:
 
 ```text
 ai-memory run [--workspace NAME] [--project NAME]
-              [--workstream NAME | --new NAME] [--executable PATH]
-              <claude|codex|opencode|pi|omp> [native arguments...]
+              [--workstream NAME | --new NAME] [--executable PATH] [--yolo]
+              [claude|codex|opencode|pi|crush|omp] [native arguments...]
 ```
 
 The default is the most recently selected workstream for the current repository
@@ -31,18 +33,59 @@ and worktree, creating one named `default` on first use. `--new NAME` starts an
 independent line of work; `--workstream NAME` returns to one. These are optional
 branching controls, not harness-switch controls.
 
+## Automatic harness selection
+
+With no harness name, `ai-memory run` inspects checkout-local sessions for
+Claude Code, Codex, OpenCode, Pi, and Crush. For an empty workstream it resumes
+the newest session automatically. For an established workstream, server state
+takes precedence: ai-memory resumes the most recently linked harness that still
+has a usable local session. It never chooses a newer but obsolete session from
+another harness merely because that file has a later timestamp. OMP remains
+available explicitly but is not in the automatic pool.
+
+Bare mode accepts wrapper options but not harness-native arguments or
+`--executable`, because their meaning depends on the selected harness. In a new
+directory with no session in the automatic pool, it exits without creating a
+workstream and suggests the explicit `ai-memory run <harness>` commands.
+
+## First managed launch
+
+An otherwise-empty workstream may adopt one of the requested harness's existing
+native sessions. On an interactive launch, ai-memory inspects that harness's
+store without modifying it and lists up to eight recent sessions whose recorded
+working directory matches the current checkout. Choose one to resume it, press
+Enter to accept the newest candidate, or choose `0` to start a new session.
+Sessions from another checkout are never offered.
+
+Adoption is only a bootstrap operation. Once any harness has linked a native
+session or contributed portable message/tool/compaction history, the workstream
+is established. If Claude established it and Codex has not joined it yet, for
+example, `ai-memory run codex` creates a fresh Codex session and injects the
+Claude workstream history. It does not inspect or select an older unrelated
+Codex session. Returning to Codex later resumes the Codex session already linked
+to that workstream.
+
+Explicit native selectors always win. `--new NAME` always creates a fresh
+native session for the new workstream. Scripted/noninteractive invocations and
+launches without terminal input skip the chooser and start fresh. A launch that
+exits before producing either a native session or portable history does not
+consume the later adoption opportunity.
+
 ## What happens on each run
 
 1. The host client resolves the normal workspace/project scope and a stable
    repository plus worktree fingerprint. It opens a 90-second renewable lease.
    One writer may own a workstream at a time, so two terminals cannot silently
    race its native-session pointers or delivery cursors.
-2. The harness adapter passes every native argument through in order and adds a
-   native create/resume selector only when the user did not supply one.
+2. Bare mode resolves the correct available harness. For an empty workstream,
+   an explicit interactive adapter can offer matching local sessions for
+   one-time adoption. Otherwise the adapter passes native arguments through in
+   order and adds a create/resume selector only when the user did not supply one.
 3. `AI_MEMORY_RUN_ID` marks lifecycle hooks as managed. SessionStart links the
    actual native session and injects only the portable events that session has
-   not seen. Direct launches do not set this variable and continue to use the
-   existing single-use handoff path.
+   not seen. Crush, which has no SessionStart hook, receives the same bounded
+   packet through a temporary `options.global_context_paths` entry. Direct
+   launches continue to use the existing single-use handoff path.
 4. When the child exits, ai-memory reads the native transcript store without
    modifying it. Visible user/assistant messages, completed tool calls/results,
    compaction summaries, and a non-mutating Git checkpoint enter an append-only
@@ -74,19 +117,38 @@ is labelled completed evidence and must never be replayed as a pending call.
 | Codex | native default creation | `resume <id>` | `~/.codex/sessions/**/rollout-*.jsonl` |
 | OpenCode | native default creation | `--session <id>` | `~/.local/share/opencode/opencode.db` opened read-only |
 | Pi | generated `--session-id` | `--session <id>` | `~/.pi/agent/sessions/**/*.jsonl` |
+| Crush | native default creation | `--session <id>` | `<project>/.crush/crush.db` opened read-only |
 | OMP | native default creation | `--resume=<id>` | `~/.omp/agent/sessions/**/*.jsonl` |
 
 An explicit native selector such as Claude's `--resume`, OpenCode's `--session`,
 or Codex's `resume` wins. ai-memory links the selected native session and resets
 an unrelated adapter cursor rather than assuming it belongs to the old session.
-Pi and OMP `--session-dir` values are passed through unchanged and used as the
-read-only import root. Native store environment overrides are also honored:
+Pi and OMP `--session-dir` values and Crush `--data-dir` values are passed
+through unchanged and used as the read-only import root. Native store
+environment overrides are also honored:
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`,
 `PI_CODING_AGENT_SESSION_DIR`, and `PI_CODING_AGENT_DIR`. The Pi-family adapter
 also recognizes a complete `.jsonl.<nonce>.tmp` atomic-write file when a native
 process exits before renaming it; incomplete final JSONL records are never
 imported. Help, version, and known utility subcommands pass through without
-session flags.
+session flags. Claude/Pi/OMP print mode, Codex `exec`, OpenCode/Crush `run`,
+redirected input, and other noninteractive launches never open the adoption
+chooser.
+
+`ai-memory run --yolo <harness>` and `ai-memory run <harness> --yolo` both use
+the harness's native dangerous mode. The translation is Claude Code
+`--dangerously-skip-permissions`, Codex
+`--dangerously-bypass-approvals-and-sandbox`, OpenCode `--auto`, Pi `--approve`,
+and Crush `--yolo`. OMP currently needs no added flag. ai-memory does not add a
+duplicate when the translated native flag is already present.
+
+Managed support is intentionally narrower than the general integration matrix.
+Gemini CLI, Kimi Code, Devin CLI, Cursor, Grok Build CLI, and other agents may
+have MCP or lifecycle-hook support without native managed resume. Contributors
+adding another managed harness must follow the [managed-harness contribution
+protocol](managed-harness-contributions.md), including read-only extraction,
+pre-turn context delivery, migration invariants, deterministic tests, and an
+opt-in real-harness acceptance pass.
 
 ## Installation and recovery
 
@@ -101,12 +163,27 @@ ai-memory install-hooks --agent pi --apply
 ai-memory install-hooks --agent omp --apply
 ```
 
+Crush needs no ai-memory hook installation for managed mode. The launcher reads
+its one-time context from the server, copies the existing global Crush JSON into
+a private temporary directory, appends an ephemeral context path, and points the
+child at that directory with `CRUSH_GLOBAL_CONFIG`. Delivery is acknowledged
+only after the child starts, so a spawn failure cannot lose the packet. The
+original config is not modified. ai-memory opens the project database read-only;
+the launched Crush process continues its normal native session writes.
+
 The Linux/macOS Docker shell wrapper cannot execute a host agent from inside its
 helper container. For `run` only, it downloads the matching native release into
 `~/.cache/ai-memory/native-runner`, verifies the published SHA-256 checksum, and
 executes that host client. Set `AI_MEMORY_NATIVE_BIN=/path/to/ai-memory` to use a
 specific native build. Native package, release, and source installs need no
 shim. On native Windows, use the published `ai-memory.exe` or a source build.
+
+The wrapper intercepts `run` before Docker and preserves the host `PATH`,
+`AI_MEMORY_SERVER_URL`, and authentication environment. If logs show
+`data_dir=/data` followed by `starting managed ... No such file or directory`,
+the installed wrapper is stale and sent the command into the helper container.
+Run `ai-memory upgrade` on the client machine. A remote/homelab server must be
+upgraded separately.
 
 If a client is killed before final import, its lease expires. A later managed
 run starts from the last committed adapter cursor, so already linked native
@@ -116,22 +193,42 @@ not silently start an unmanaged agent.
 
 ## Privacy and storage boundaries
 
-Managed mode does not write to Claude, Codex, OpenCode, Pi, or OMP private
-stores. Adapters read only documented/observed local session formats. Provider
-credentials, encrypted content, system/developer prompt records, and hidden
-reasoning are not copied. The server sanitizer runs before both the SQLite FTS
-ledger and immutable files under
+ai-memory's managed adapters do not write to Claude, Codex, OpenCode, Pi, Crush,
+or OMP private stores. The launched harness retains normal ownership of its own
+session writes. Adapters read only documented or observed local session formats.
+Provider credentials, encrypted content, system/developer prompt records, and
+hidden reasoning are not copied. The server sanitizer runs before both the
+SQLite FTS ledger and immutable files under
 `<data_dir>/raw/workstreams/<workstream-id>/segments/` are written.
 
 The ledger is an operational continuity substrate, not a replacement for the
 markdown wiki. Durable decisions, rules, procedures, and project facts still
 belong in wiki pages through consolidation or explicit durable writes.
 
+## Project and directory renames
+
+`ai-memory rename-project --from OLD --to NEW` changes only the server-side
+project name. Wiki paths are UUID-keyed, so it moves no server directory, source
+checkout, or native harness session. If the source checkout path itself is
+renamed, absolute-path session locators used by Claude Code, Codex, OpenCode,
+Pi, and OMP may still reference the old path; Crush's project-local `.crush`
+database moves with the checkout.
+
+There is no portable, supported API that rewrites every harness's private
+project locator. ai-memory therefore does not mutate those stores or silently
+equate a renamed checkout with another clone of the same remote. Explicit
+native selectors still win and can recover a session when that harness supports
+cross-directory resume; OpenCode also provides its own export/import flow. For
+a renamed checkout, use an explicit harness and its documented session selector
+to seed the new managed workstream. Keep the old checkout path available until
+recovery is verified. Automatic discovery intentionally requires the recorded
+checkout to match exactly.
+
 ## Manual acceptance
 
-The opt-in acceptance runner exercises wrapper edge cases and then orchestrates
-the locally installed Claude, Codex, OpenCode, Pi, and OMP CLIs through one real
-workstream:
+The opt-in acceptance runner exercises launcher edge cases and then orchestrates
+the locally installed Claude, Codex, OpenCode, Pi, Crush, and OMP CLIs through
+one real workstream:
 
 ```bash
 scripts/managed-workstream-acceptance.sh
@@ -142,8 +239,14 @@ and model calls. Hook configs, native session stores, the ai-memory server, and
 the Git fixture are isolated under a temporary directory. Claude, Codex, and
 OpenCode receive only copied authentication material; OMP receives a temporary
 agent directory with read-consistent credential/model database backups and
-copied settings. Native session creation, read-only extraction, cross-harness
-injection, and returning resume paths are all exercised. Set
+copied settings. Crush uses its existing global provider configuration and an
+isolated project database. The deterministic phase also covers first-run
+adoption, bare-mode selection and empty-directory failure, wrapper `--yolo`,
+lease exclusion, Crush context cleanup, and the established-workstream guard
+against obsolete sessions. Native session creation, read-only extraction,
+cross-harness injection, and returning resume paths are all exercised. Docker
+wrapper host execution and remote URL preservation are covered separately by
+the `ai-memory-cli` packaging tests. Set
 `AI_MEMORY_ACCEPTANCE_HARNESSES="claude codex"` to select
 a subset, `AI_MEMORY_ACCEPTANCE_DETERMINISTIC_ONLY=1` to skip model calls, or
 `AI_MEMORY_ACCEPTANCE_KEEP=1` to retain all temporary logs and data.

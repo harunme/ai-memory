@@ -119,6 +119,14 @@ pub struct PrepareManagedRunRequest {
     pub worktree_fingerprint: String,
     /// Harness being launched.
     pub agent: AgentKind,
+    /// Resolve the harness from the established workstream when possible.
+    /// The provisional `agent` is the newest checkout-local candidate.
+    #[serde(default)]
+    pub automatic_harness: bool,
+    /// Checkout-local harnesses with resumable sessions. The server only uses
+    /// these values when `automatic_harness` is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_agents: Vec<AgentKind>,
     /// Select an existing named workstream instead of the current selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workstream: Option<String>,
@@ -138,6 +146,10 @@ pub struct PrepareManagedRunResponse {
     pub workstream_name: String,
     /// Lease/run identifier exported to the child process.
     pub run_id: ManagedRunId,
+    /// Harness selected by the server. Old servers omit this field; explicit
+    /// harness launches remain compatible, while automatic launches fail safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent: Option<AgentKind>,
     /// Previously linked native session for this harness, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
@@ -148,6 +160,18 @@ pub struct PrepareManagedRunResponse {
     pub sync_after: i64,
     /// Portable high-water mark assigned to this launch.
     pub sync_through: i64,
+    /// Whether this otherwise-empty workstream may adopt a pre-existing native
+    /// session. Old servers omit this field, which safely defaults to fresh.
+    #[serde(default)]
+    pub may_adopt_existing_session: bool,
+}
+
+/// One-time startup context for harnesses without a SessionStart hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedRunContextResponse {
+    /// Bounded portable context packet, or `None` when there is nothing new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 /// Bind the actual native session selected or created by a managed launch.
@@ -235,4 +259,41 @@ pub struct WorkstreamEvent {
     /// Source timestamp when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_prepare_response_defaults_to_no_adoption() {
+        let response: PrepareManagedRunResponse = serde_json::from_value(serde_json::json!({
+            "workstream_id": "018f0000-0000-7000-8000-000000000001",
+            "workstream_name": "default",
+            "run_id": "018f0000-0000-7000-8000-000000000002",
+            "sync_after": 0,
+            "sync_through": 0
+        }))
+        .unwrap();
+
+        assert!(!response.may_adopt_existing_session);
+        assert!(response.resolved_agent.is_none());
+    }
+
+    #[test]
+    fn older_prepare_request_defaults_to_explicit_harness() {
+        let request: PrepareManagedRunRequest = serde_json::from_value(serde_json::json!({
+            "workspace": "default",
+            "project": "memory",
+            "cwd": "/repo",
+            "repo_fingerprint": "repo",
+            "worktree_fingerprint": "worktree",
+            "agent": "codex",
+            "lease_owner": "host:1"
+        }))
+        .unwrap();
+
+        assert!(!request.automatic_harness);
+        assert!(request.available_agents.is_empty());
+    }
 }

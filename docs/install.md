@@ -1094,7 +1094,7 @@ docker run --rm akitaonrails/ai-memory:latest --help     # full subcommand tree
 | Subcommand | Pattern | What it does |
 |---|---|---|
 | `serve` | `docker compose up -d` (already done) | Run the HTTP MCP server |
-| `run <harness> [args...]` | host wrapper or native binary | Opt into one managed cross-harness workstream; all arguments after the harness name go to the harness unchanged |
+| `run [harness] [args...]` | host wrapper or native binary | Opt into one managed cross-harness workstream; omit the harness to resume the newest usable local session, or name Claude Code, Codex, OpenCode, Pi, Crush, or OMP explicitly; exact `--yolo` is wrapper-owned and other native arguments pass through |
 | `workstream-search [query]` | managed child or thin HTTP client | Search the complete visible managed-workstream ledger; the managed child receives its workstream id automatically |
 | `status` | `docker exec` | Counts, paths, derived-index diagnostics, and passive LLM/embedding provider health |
 | `search "<query>"` | `docker exec` | Wiki search with FTS5 + graph/vector RRF |
@@ -1336,6 +1336,13 @@ helper container. For local loopback servers, it automatically bridges
 that helper back to the host's `127.0.0.1:49374`, so `ai-memory status`,
 `ai-memory search`, and `ai-memory bootstrap` work with the same default
 URL as the generated agent config.
+
+`ai-memory run` is the exception: the current wrapper intercepts it and starts a
+cached checksum-verified native client on the host, where harness executables
+and session stores exist. It preserves an explicit remote
+`AI_MEMORY_SERVER_URL`. If `run` logs `data_dir=/data` and then cannot find
+`codex`, `claude`, or another harness executable, refresh the stale wrapper with
+`ai-memory upgrade` on that client machine.
 
 ### Docker compose alternative
 

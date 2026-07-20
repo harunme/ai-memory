@@ -6,9 +6,9 @@ use std::str::FromStr as _;
 
 use ai_memory_core::{
     AgentKind, AuthLevel, Capability, FinishManagedRunRequest, FinishManagedRunResponse,
-    LinkManagedRunRequest, ManagedRunId, ManagedRunStatus, NewWorkstreamEvent,
-    PrepareManagedRunRequest, PrepareManagedRunResponse, Sanitizer, WorkstreamEventKind,
-    WorkstreamId,
+    LinkManagedRunRequest, ManagedRunContextResponse, ManagedRunId, ManagedRunStatus,
+    NewWorkstreamEvent, PrepareManagedRunRequest, PrepareManagedRunResponse, Sanitizer,
+    WorkstreamEventKind, WorkstreamId,
 };
 use ai_memory_store::{
     FinishWorkstreamRun, PrepareWorkstreamRun, ReaderPool, StoreError, WorkstreamSelection,
@@ -51,6 +51,11 @@ pub fn workstream_router(state: WorkstreamState) -> Router {
         .route("/workstream/runs", post(prepare_run))
         .route("/workstream/runs/{run_id}", get(run_status))
         .route("/workstream/runs/{run_id}/heartbeat", post(heartbeat_run))
+        .route("/workstream/runs/{run_id}/context", post(run_context))
+        .route(
+            "/workstream/runs/{run_id}/context/accept",
+            post(accept_run_context),
+        )
         .route("/workstream/runs/{run_id}/link", post(link_run))
         .route("/workstream/runs/{run_id}/finish", post(finish_run))
         .route("/workstream/{workstream_id}/events", get(search_events))
@@ -127,11 +132,32 @@ async fn prepare_run(
             | AgentKind::Codex
             | AgentKind::OpenCode
             | AgentKind::Pi
+            | AgentKind::Crush
             | AgentKind::Omp
     ) {
         return error(
             StatusCode::BAD_REQUEST,
             "managed run requires a supported command-line harness",
+        );
+    }
+    const AUTO_AGENTS: [AgentKind; 5] = [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::OpenCode,
+        AgentKind::Pi,
+        AgentKind::Crush,
+    ];
+    if request.automatic_harness
+        && (!AUTO_AGENTS.contains(&request.agent)
+            || !request.available_agents.contains(&request.agent)
+            || request
+                .available_agents
+                .iter()
+                .any(|agent| !AUTO_AGENTS.contains(agent)))
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "automatic managed run requires supported checkout-local harnesses",
         );
     }
     for (label, value) in [
@@ -178,6 +204,8 @@ async fn prepare_run(
             worktree_fingerprint: request.worktree_fingerprint,
             cwd: request.cwd,
             agent: request.agent,
+            automatic_harness: request.automatic_harness,
+            available_agents: request.available_agents,
             selection,
             lease_owner: request.lease_owner,
         })
@@ -187,10 +215,12 @@ async fn prepare_run(
             workstream_id: prepared.workstream_id,
             workstream_name: prepared.workstream_name,
             run_id: prepared.run_id,
+            resolved_agent: Some(prepared.agent),
             native_session_id: prepared.native_session_id,
             source_cursor: prepared.source_cursor,
             sync_after: prepared.sync_after,
             sync_through: prepared.sync_through,
+            may_adopt_existing_session: prepared.may_adopt_existing_session,
         })
         .into_response(),
         Err(failure) => store_error_response(failure),
@@ -237,6 +267,71 @@ async fn heartbeat_run(
         Err(response) => return response.into_response(),
     };
     match state.writer.heartbeat_managed_run(run_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error(StatusCode::CONFLICT, "managed run lease is not active"),
+        Err(failure) => store_error_response(failure),
+    }
+}
+
+async fn run_context(
+    State(state): State<WorkstreamState>,
+    level: Option<Extension<AuthLevel>>,
+    AxumPath(raw_run_id): AxumPath<String>,
+) -> Response {
+    if let Err(response) = authorize(level, Capability::NormalWrite) {
+        return response.into_response();
+    }
+    let run_id = match parse_run_id(&raw_run_id) {
+        Ok(id) => id,
+        Err(response) => return response.into_response(),
+    };
+    let context = match state.reader.managed_run_context(run_id, 256).await {
+        Ok(Some(context)) => context,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "active managed run not found"),
+        Err(failure) => return error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()),
+    };
+    if context.agent != AgentKind::Crush {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "direct managed context is only supported for Crush",
+        );
+    }
+    if context.context_delivered {
+        return Json(ManagedRunContextResponse { context: None }).into_response();
+    }
+    let rendered = crate::router::render_managed_context(
+        &context.events,
+        &context.workstream_name,
+        context.workstream_id,
+        context.sync_after,
+    );
+    Json(ManagedRunContextResponse { context: rendered }).into_response()
+}
+
+async fn accept_run_context(
+    State(state): State<WorkstreamState>,
+    level: Option<Extension<AuthLevel>>,
+    AxumPath(raw_run_id): AxumPath<String>,
+) -> Response {
+    if let Err(response) = authorize(level, Capability::NormalWrite) {
+        return response.into_response();
+    }
+    let run_id = match parse_run_id(&raw_run_id) {
+        Ok(id) => id,
+        Err(response) => return response.into_response(),
+    };
+    let status = match state.reader.managed_run_status(run_id).await {
+        Ok(Some(status)) => status,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "managed run not found"),
+        Err(failure) => return error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()),
+    };
+    if status.agent != AgentKind::Crush {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "direct managed context is only supported for Crush",
+        );
+    }
+    match state.writer.accept_managed_run_context(run_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error(StatusCode::CONFLICT, "managed run lease is not active"),
         Err(failure) => store_error_response(failure),
@@ -602,4 +697,218 @@ fn truncate_owned(value: &mut String, max: usize) {
     }
     value.truncate(end);
     value.push_str("\n[truncated by ai-memory]");
+}
+
+#[cfg(test)]
+mod tests {
+    use ai_memory_store::Store;
+    use axum::body::to_bytes;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_state(store: &Store, data_dir: &Path) -> WorkstreamState {
+        WorkstreamState {
+            writer: store.writer.clone(),
+            reader: store.reader.clone(),
+            sanitizer: Sanitizer::default(),
+            data_dir: data_dir.to_path_buf(),
+        }
+    }
+
+    fn prepare_input(
+        workspace_id: ai_memory_core::WorkspaceId,
+        project_id: ai_memory_core::ProjectId,
+        agent: AgentKind,
+        owner: &str,
+    ) -> PrepareWorkstreamRun {
+        PrepareWorkstreamRun {
+            workspace_id,
+            project_id,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: owner.into(),
+        }
+    }
+
+    async fn seed_scope(store: &Store) -> (ai_memory_core::WorkspaceId, ai_memory_core::ProjectId) {
+        let workspace_id = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project_id = store
+            .writer
+            .get_or_create_project(workspace_id, "managed", None)
+            .await
+            .unwrap();
+        (workspace_id, project_id)
+    }
+
+    #[tokio::test]
+    async fn automatic_prepare_returns_the_established_available_harness() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let state = test_state(&store, temp.path());
+        let (workspace_id, project_id) = seed_scope(&store).await;
+        let claude = store
+            .writer
+            .prepare_workstream_run(prepare_input(
+                workspace_id,
+                project_id,
+                AgentKind::ClaudeCode,
+                "claude",
+            ))
+            .await
+            .unwrap();
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: claude.run_id,
+                native_session_id: Some("claude-current".into()),
+                source_cursor: Some("cursor".into()),
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let response = prepare_run(
+            State(state),
+            None,
+            Json(PrepareManagedRunRequest {
+                workspace: "default".into(),
+                project: "managed".into(),
+                cwd: "/repo".into(),
+                repo_fingerprint: "repo".into(),
+                worktree_fingerprint: "worktree".into(),
+                agent: AgentKind::Codex,
+                automatic_harness: true,
+                available_agents: vec![AgentKind::Codex, AgentKind::ClaudeCode],
+                workstream: None,
+                new_workstream: None,
+                lease_owner: "automatic".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let prepared: PrepareManagedRunResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(prepared.resolved_agent, Some(AgentKind::ClaudeCode));
+        assert_eq!(
+            prepared.native_session_id.as_deref(),
+            Some("claude-current")
+        );
+        assert!(!prepared.may_adopt_existing_session);
+    }
+
+    #[tokio::test]
+    async fn crush_context_fetch_is_repeatable_until_explicit_accept() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let state = test_state(&store, temp.path());
+        let (workspace_id, project_id) = seed_scope(&store).await;
+        let codex = store
+            .writer
+            .prepare_workstream_run(prepare_input(
+                workspace_id,
+                project_id,
+                AgentKind::Codex,
+                "codex",
+            ))
+            .await
+            .unwrap();
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: codex.run_id,
+                native_session_id: Some("codex-native".into()),
+                source_cursor: None,
+                events: vec![NewWorkstreamEvent {
+                    event_id: "codex:assistant:1".into(),
+                    agent: AgentKind::Codex,
+                    native_session_id: "codex-native".into(),
+                    source_record_id: None,
+                    kind: WorkstreamEventKind::Message,
+                    role: Some("assistant".into()),
+                    content: "AMWS-CODEX-SENTINEL".into(),
+                    occurred_at: None,
+                    metadata: serde_json::json!({}),
+                }],
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+        let crush = store
+            .writer
+            .prepare_workstream_run(prepare_input(
+                workspace_id,
+                project_id,
+                AgentKind::Crush,
+                "crush",
+            ))
+            .await
+            .unwrap();
+
+        let fetch = || {
+            run_context(
+                State(state.clone()),
+                None,
+                AxumPath(crush.run_id.to_string()),
+            )
+        };
+        for _ in 0..2 {
+            let response = fetch().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let packet: ManagedRunContextResponse = serde_json::from_slice(&body).unwrap();
+            assert!(
+                packet
+                    .context
+                    .as_deref()
+                    .is_some_and(|context| context.contains("AMWS-CODEX-SENTINEL"))
+            );
+            assert!(
+                !store
+                    .reader
+                    .managed_run_status(crush.run_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .context_delivered
+            );
+        }
+
+        let accepted = accept_run_context(
+            State(state.clone()),
+            None,
+            AxumPath(crush.run_id.to_string()),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+        assert!(
+            store
+                .reader
+                .managed_run_status(crush.run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .context_delivered
+        );
+
+        let response = fetch().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let packet: ManagedRunContextResponse = serde_json::from_slice(&body).unwrap();
+        assert!(packet.context.is_none());
+    }
 }

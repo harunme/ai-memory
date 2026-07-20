@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ai-memory run` without a harness now selects among checkout-local Claude
+  Code, Codex, OpenCode, Pi, and Crush sessions. Empty workstreams adopt the
+  newest session automatically; established workstreams prefer their most
+  recently linked available harness. A directory with no matching session
+  exits with explicit start commands instead of creating an empty workstream.
+- Managed workstreams now support Crush through its project-local read-only
+  SQLite transcript and supported `options.global_context_paths` configuration.
+  ai-memory never writes the original Crush config or session database; the
+  launched Crush process retains normal ownership of its native session writes.
+- Wrapper-owned `run --yolo` translates to each harness's native dangerous-mode
+  option for Claude Code, Codex, OpenCode, Pi, and Crush.
+- A managed-harness contribution protocol documents the native-session,
+  read-only import, context-delivery, migration, privacy, and acceptance-test
+  requirements for adding agents beyond the currently supported set.
+
+### Changed
+- The first interactive `ai-memory run` on an otherwise-empty workstream now
+  offers recent native sessions recorded for the same checkout, with the newest
+  as the default or an explicit fresh-session choice. Adoption is disabled for
+  `--new`, explicit selectors, scripted/noninteractive launches, and any
+  workstream already established by another harness, preventing obsolete local
+  sessions from contaminating later cross-harness switches.
+
+### Fixed
+- Managed runs now verify the host harness executable before opening a server
+  lease and report how to refresh a stale Docker wrapper. The wrapper path is
+  regression-tested to preserve a remote `AI_MEMORY_SERVER_URL`, auth, and the
+  host `PATH` without entering Docker, and now retains the `run` subcommand when
+  it hands control to the native ai-memory client.
+- Corrected stale project-move flags in the marker guide and documented the
+  distinction between a server-side project rename and a physical checkout or
+  native-session relocation.
+
 ## [1.16.0] - 2026-07-20
 
 ### Added

@@ -892,12 +892,35 @@ fn apply_to_devin_settings(
     data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
+    let staged = stage_hook_scripts(hooks_dir, "devin")?;
+    apply_to_devin_settings_with_staged(&staged, server_url, auth_token, data_dir, args)
+}
+
+#[cfg(test)]
+fn apply_to_devin_settings_in(
+    hooks_dir: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    data_dir: &Path,
+    staging_data_local: &Path,
+    args: &InstallHooksArgs,
+) -> Result<()> {
+    let staged = stage_hook_scripts_in(hooks_dir, "devin", staging_data_local)?;
+    apply_to_devin_settings_with_staged(&staged, server_url, auth_token, data_dir, args)
+}
+
+fn apply_to_devin_settings_with_staged(
+    staged: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    data_dir: &Path,
+    args: &InstallHooksArgs,
+) -> Result<()> {
     let path = match &args.config_file {
         Some(p) => p.clone(),
         None => devin_hooks_path()?,
     };
-    let staged = stage_hook_scripts(hooks_dir, "devin")?;
-    let command_dir = staged_command_dir(&staged, "devin");
+    let command_dir = staged_command_dir(staged, "devin");
     let strategy = args.project_strategy.baked();
     let payload = build_devin_payload_with_data_dir(
         &command_dir,
@@ -5219,10 +5242,11 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
         let config_tmp = TempDir::new().unwrap();
         let config_path = config_tmp.path().join("hooks.v1.json");
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,
@@ -5280,10 +5304,11 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
         )
         .unwrap();
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,
@@ -5347,19 +5372,21 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             apply: false,
         };
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             config_tmp.path(),
             &args_v1,
         )
         .unwrap();
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             config_tmp.path(),
             &args_v1,
         )
@@ -5389,19 +5416,21 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             apply: false,
         };
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp2.path(),
             config_tmp2.path(),
             &args_config,
         )
         .unwrap();
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp2.path(),
             config_tmp2.path(),
             &args_config,
         )
@@ -5439,10 +5468,11 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
         )
         .unwrap();
 
-        apply_to_devin_settings(
+        apply_to_devin_settings_in(
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,

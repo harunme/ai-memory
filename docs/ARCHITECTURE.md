@@ -103,14 +103,21 @@ from hook paths.
    reverses. Or: `git push` the wiki dir + `rsync` the data dir.
 
 **Optional managed-workstream loop:** `ai-memory run` opens a lease for the
-current repository/worktree workstream, uses a harness adapter to create or
-resume that harness's native session, and marks lifecycle calls with an
-invocation-scoped run id. SessionStart injects an unseen bounded event range;
-the host imports the native transcript tail and a Git checkpoint when the child
-exits. Native stores are read-only. Raw sanitized JSONL segments are immutable,
-while SQLite supplies monotonic sequences, FTS, native source/delivery cursors,
-and idempotent retry state. A full-ledger `workstream-search` path complements
-the bounded startup packet. See [Managed cross-harness
+current repository/worktree workstream, resolves an explicit harness or the
+newest usable local/linked harness, creates or resumes that harness's native
+session, and marks lifecycle calls with an invocation-scoped run id.
+SessionStart injects an unseen bounded event range; Crush receives it through a
+temporary supported global-context path because it lacks SessionStart. The host
+imports the native transcript tail and a Git checkpoint when the child exits.
+ai-memory opens native stores read-only. Raw sanitized JSONL segments are
+immutable, while SQLite supplies monotonic sequences, FTS, native
+source/delivery cursors, and idempotent retry state. A full-ledger
+`workstream-search` path complements
+the bounded startup packet. An interactive empty workstream may adopt a
+checkout-matching native session once. Eligibility comes from authoritative
+ledger/session state: after any harness establishes the workstream, a newly
+joining harness starts fresh and receives portable history instead of adopting
+unrelated old native history. See [Managed cross-harness
 workstreams](managed-workstreams.md).
 
 ## Hook event vocabulary

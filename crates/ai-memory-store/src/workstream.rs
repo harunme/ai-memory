@@ -41,6 +41,10 @@ pub struct PrepareWorkstreamRun {
     pub cwd: String,
     /// Harness being launched.
     pub agent: AgentKind,
+    /// Prefer the newest linked harness that is also available locally.
+    pub automatic_harness: bool,
+    /// Harnesses with checkout-local resumable sessions.
+    pub available_agents: Vec<AgentKind>,
     /// Workstream selection behavior.
     pub selection: WorkstreamSelection,
     /// Diagnostic lease owner.
@@ -56,6 +60,8 @@ pub struct PreparedWorkstreamRun {
     pub workstream_name: String,
     /// New invocation/lease id.
     pub run_id: ManagedRunId,
+    /// Harness selected for this invocation.
+    pub agent: AgentKind,
     /// Current native session for the requested harness.
     pub native_session_id: Option<String>,
     /// Last adapter cursor for that native session.
@@ -64,6 +70,9 @@ pub struct PreparedWorkstreamRun {
     pub sync_after: i64,
     /// Workstream high-water mark assigned to the launch.
     pub sync_through: i64,
+    /// Whether no harness has established this workstream yet, allowing the
+    /// launcher to offer checkout-local native session adoption.
+    pub may_adopt_existing_session: bool,
 }
 
 /// Store-level finish input after the raw segment has been made durable.
@@ -188,12 +197,17 @@ pub(crate) fn prepare_run(
         params![workstream_id.as_bytes()],
         |row| row.get(0),
     )?;
+    let agent = if input.automatic_harness {
+        newest_available_agent(&tx, workstream_id, &input.available_agents)?.unwrap_or(input.agent)
+    } else {
+        input.agent
+    };
     let native: Option<(String, Option<String>, i64)> = tx
         .query_row(
             "SELECT native_session_id, source_cursor, delivery_cursor \
              FROM workstream_native_sessions \
              WHERE workstream_id = ?1 AND agent_kind = ?2 AND is_current = 1",
-            params![workstream_id.as_bytes(), input.agent.as_str()],
+            params![workstream_id.as_bytes(), agent.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -201,6 +215,16 @@ pub(crate) fn prepare_run(
         .map_or((None, None, 0), |(session, cursor, delivery)| {
             (Some(session), cursor, delivery)
         });
+    let established: i64 = tx.query_row(
+        "SELECT CASE WHEN \
+             EXISTS(SELECT 1 FROM workstream_native_sessions WHERE workstream_id = ?1) \
+             OR EXISTS(SELECT 1 FROM workstream_events \
+                       WHERE workstream_id = ?1 \
+                         AND kind IN ('message', 'tool_call', 'tool_result', 'compaction')) \
+             THEN 1 ELSE 0 END",
+        params![workstream_id.as_bytes()],
+        |row| row.get(0),
+    )?;
 
     let run_id = ManagedRunId::new();
     tx.execute(
@@ -211,7 +235,7 @@ pub(crate) fn prepare_run(
         params![
             run_id.as_bytes(),
             workstream_id.as_bytes(),
-            input.agent.as_str(),
+            agent.as_str(),
             input.lease_owner,
             native_session_id,
             sync_after,
@@ -230,11 +254,34 @@ pub(crate) fn prepare_run(
         workstream_id,
         workstream_name,
         run_id,
+        agent,
         native_session_id,
         source_cursor,
         sync_after,
         sync_through: latest_sequence,
+        may_adopt_existing_session: established == 0,
     })
+}
+
+fn newest_available_agent(
+    tx: &Transaction<'_>,
+    workstream_id: WorkstreamId,
+    available: &[AgentKind],
+) -> StoreResult<Option<AgentKind>> {
+    let mut statement = tx.prepare(
+        "SELECT agent_kind FROM workstream_native_sessions \
+         WHERE workstream_id = ?1 AND is_current = 1 ORDER BY updated_at DESC",
+    )?;
+    let rows = statement.query_map(params![workstream_id.as_bytes()], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let agent = AgentKind::from_wire(&row?);
+        if available.contains(&agent) {
+            return Ok(Some(agent));
+        }
+    }
+    Ok(None)
 }
 
 fn select_workstream(

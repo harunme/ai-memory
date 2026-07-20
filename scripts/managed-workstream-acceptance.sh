@@ -8,7 +8,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN=${AI_MEMORY_ACCEPTANCE_BIN:-"$ROOT/target/debug/ai-memory"}
 KEEP=${AI_MEMORY_ACCEPTANCE_KEEP:-0}
 DETERMINISTIC_ONLY=${AI_MEMORY_ACCEPTANCE_DETERMINISTIC_ONLY:-0}
-HARNESS_WORDS=${AI_MEMORY_ACCEPTANCE_HARNESSES:-"claude codex opencode pi omp"}
+HARNESS_WORDS=${AI_MEMORY_ACCEPTANCE_HARNESSES:-"claude codex opencode pi crush omp"}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ai-memory-workstream-acceptance.XXXXXX")
 DATA="$TMP/data"
 REPO="$TMP/repo"
@@ -30,7 +30,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for command in cargo curl diff git jq sqlite3; do
+for command in cargo curl diff git jq script sqlite3; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing required command: %s\n' "$command" >&2
     exit 1
@@ -100,6 +100,13 @@ case "${AI_MEMORY_ACCEPTANCE_FAKE_MODE:-argv}" in
     : >"$AI_MEMORY_ACCEPTANCE_STARTED"
     sleep "${AI_MEMORY_ACCEPTANCE_SLEEP:-3}"
     ;;
+  crush)
+    printf '%s\n' "$@" >"$AI_MEMORY_ACCEPTANCE_ARGV_LOG"
+    printf '%s\n' "$CRUSH_GLOBAL_CONFIG" >"$AI_MEMORY_ACCEPTANCE_CRUSH_ENV_LOG"
+    cp "$CRUSH_GLOBAL_CONFIG/crush.json" "$AI_MEMORY_ACCEPTANCE_CRUSH_CONFIG_LOG"
+    packet=$(jq -r '.options.global_context_paths[-1]' "$CRUSH_GLOBAL_CONFIG/crush.json")
+    cp "$packet" "$AI_MEMORY_ACCEPTANCE_CRUSH_PACKET_LOG"
+    ;;
 esac
 EOF
 chmod +x "$FAKE"
@@ -112,7 +119,9 @@ printf 'running deterministic wrapper edge checks\n'
     "$BIN" --data-dir "$DATA" run --new edge-argv --executable "$FAKE" \
       codex --yolo -m gpt-5 "prompt words" >"$LOGS/edge-argv.log" 2>&1
 )
-diff -u <(printf '%s\n' --yolo -m gpt-5 "prompt words") "$TMP/argv.log"
+diff -u \
+  <(printf '%s\n' -m gpt-5 "prompt words" --dangerously-bypass-approvals-and-sandbox) \
+  "$TMP/argv.log"
 
 set +e
 (
@@ -160,6 +169,164 @@ set -e
 }
 wait "$lease_pid"
 
+# Bare run must fail before contacting the server when this checkout has no
+# native session in any auto-detected harness.
+mkdir -p "$CONFIG/empty-home"
+set +e
+(
+  cd "$REPO"
+  HOME="$CONFIG/empty-home" XDG_DATA_HOME="$CONFIG/empty-home/xdg-data" \
+    "$BIN" --data-dir "$DATA" run >"$LOGS/edge-auto-empty.log" 2>&1
+)
+auto_empty_code=$?
+set -e
+[ "$auto_empty_code" -ne 0 ] || {
+  printf 'bare run unexpectedly started without a checkout-local session\n' >&2
+  exit 1
+}
+grep -q 'no Claude Code, Codex, OpenCode, Pi, or Crush session' \
+  "$LOGS/edge-auto-empty.log"
+
+# On a new workstream, bare run automatically adopts the newest local session.
+AUTO_HOME="$CONFIG/auto-home"
+AUTO_CODEX_HOME="$AUTO_HOME/.codex"
+AUTO_CLAUDE_HOME="$AUTO_HOME/.claude"
+AUTO_BIN="$AUTO_HOME/bin"
+mkdir -p "$AUTO_CODEX_HOME/sessions/2026/01/01" \
+  "$AUTO_CLAUDE_HOME/projects/fixture" "$AUTO_BIN"
+ln -s "$FAKE" "$AUTO_BIN/codex"
+ln -s "$FAKE" "$AUTO_BIN/claude"
+printf '{"sessionId":"auto-claude-old","cwd":"%s"}\n' "$REPO" \
+  >"$AUTO_CLAUDE_HOME/projects/fixture/auto-claude-old.jsonl"
+sleep 1
+printf '{"type":"session_meta","payload":{"id":"auto-codex-new","cwd":"%s"}}\n' \
+  "$REPO" >"$AUTO_CODEX_HOME/sessions/2026/01/01/rollout-auto.jsonl"
+(
+  cd "$REPO"
+  HOME="$AUTO_HOME" CODEX_HOME="$AUTO_CODEX_HOME" \
+  CLAUDE_CONFIG_DIR="$AUTO_CLAUDE_HOME" PATH="$AUTO_BIN:$PATH" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/auto-newest-argv.log" \
+    "$BIN" --data-dir "$DATA" run --workspace edge-auto --project edge-auto --yolo \
+      >"$LOGS/edge-auto-newest.log" 2>&1
+)
+diff -u \
+  <(printf '%s\n' resume auto-codex-new --dangerously-bypass-approvals-and-sandbox) \
+  "$TMP/auto-newest-argv.log"
+
+# Establish Claude after Codex, then verify bare run follows the managed
+# workstream's current Claude link instead of the newer but obsolete Codex file.
+(
+  cd "$REPO"
+  HOME="$AUTO_HOME" CLAUDE_CONFIG_DIR="$AUTO_CLAUDE_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/auto-claude-first-argv.log" \
+    "$BIN" --data-dir "$DATA" run --workspace edge-auto --project edge-auto \
+      --executable "$FAKE" claude >"$LOGS/edge-auto-claude-first.log" 2>&1
+)
+mapfile -t auto_claude_first <"$TMP/auto-claude-first-argv.log"
+[ "${auto_claude_first[0]:-}" = --session-id ] || {
+  printf 'Claude did not create a fresh managed session\n' >&2
+  exit 1
+}
+auto_claude_id=${auto_claude_first[1]}
+(
+  cd "$REPO"
+  HOME="$AUTO_HOME" CODEX_HOME="$AUTO_CODEX_HOME" \
+  CLAUDE_CONFIG_DIR="$AUTO_CLAUDE_HOME" PATH="$AUTO_BIN:$PATH" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/auto-managed-precedence-argv.log" \
+    "$BIN" --data-dir "$DATA" run --workspace edge-auto --project edge-auto \
+      >"$LOGS/edge-auto-managed-precedence.log" 2>&1
+)
+diff -u <(printf '%s\n' --resume "$auto_claude_id") \
+  "$TMP/auto-managed-precedence-argv.log"
+
+# Crush has no SessionStart hook. Verify the launcher fetches the packet into a
+# temporary supported global-context config, then removes it after exit.
+(
+  cd "$REPO"
+  HOME="$AUTO_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=crush \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/crush-context-argv.log" \
+  AI_MEMORY_ACCEPTANCE_CRUSH_ENV_LOG="$TMP/crush-context-env.log" \
+  AI_MEMORY_ACCEPTANCE_CRUSH_CONFIG_LOG="$TMP/crush-context-config.json" \
+  AI_MEMORY_ACCEPTANCE_CRUSH_PACKET_LOG="$TMP/crush-context-packet.md" \
+    "$BIN" --data-dir "$DATA" run --workspace edge-auto --project edge-auto \
+      --executable "$FAKE" --yolo crush >"$LOGS/edge-crush-context.log" 2>&1
+)
+diff -u <(printf '%s\n' --yolo) "$TMP/crush-context-argv.log"
+grep -q 'ai-memory managed workstream' "$TMP/crush-context-packet.md"
+crush_context_dir=$(cat "$TMP/crush-context-env.log")
+[ ! -e "$crush_context_dir" ] || {
+  printf 'temporary Crush context directory was not removed\n' >&2
+  exit 1
+}
+
+# A blank first launch remains eligible for one-time native-session adoption.
+# Use a pseudo-terminal because redirected/scripted launches deliberately skip
+# the chooser.
+ADOPTION_CODEX_HOME="$CONFIG/adoption-codex"
+mkdir -p "$ADOPTION_CODEX_HOME/sessions/2026/01/01"
+(
+  cd "$REPO"
+  CODEX_HOME="$ADOPTION_CODEX_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/adoption-blank-argv.log" \
+    "$BIN" --data-dir "$DATA" run --new edge-adopt --executable "$FAKE" \
+      codex >"$LOGS/edge-adoption-blank.log" 2>&1
+)
+printf '{"type":"session_meta","payload":{"id":"adoption-codex-id","cwd":"%s"}}\n' \
+  "$REPO" >"$ADOPTION_CODEX_HOME/sessions/2026/01/01/rollout-adoption.jsonl"
+
+ADOPTION_RUNNER="$TMP/adoption-runner.sh"
+cat >"$ADOPTION_RUNNER" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$AI_MEMORY_ACCEPTANCE_REPO"
+exec "$AI_MEMORY_ACCEPTANCE_BIN" --data-dir "$AI_MEMORY_ACCEPTANCE_DATA" \
+  run --workstream edge-adopt --executable "$AI_MEMORY_ACCEPTANCE_FAKE" "$@"
+EOF
+chmod +x "$ADOPTION_RUNNER"
+
+printf '\n' | env \
+  AI_MEMORY_ACCEPTANCE_REPO="$REPO" \
+  AI_MEMORY_ACCEPTANCE_BIN="$BIN" \
+  AI_MEMORY_ACCEPTANCE_DATA="$DATA" \
+  AI_MEMORY_ACCEPTANCE_FAKE="$FAKE" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/adoption-codex-argv.log" \
+  CODEX_HOME="$ADOPTION_CODEX_HOME" \
+  script -qefc "$ADOPTION_RUNNER codex" /dev/null \
+    >"$LOGS/edge-adoption-codex.log" 2>&1
+diff -u <(printf '%s\n' resume adoption-codex-id) "$TMP/adoption-codex-argv.log"
+
+# Once Codex establishes the workstream, Claude must start clean even when an
+# obsolete checkout-local Claude session exists.
+ADOPTION_CLAUDE_HOME="$CONFIG/adoption-claude"
+mkdir -p "$ADOPTION_CLAUDE_HOME/projects/fixture"
+printf '{"sessionId":"obsolete-claude-id","cwd":"%s"}\n' "$REPO" \
+  >"$ADOPTION_CLAUDE_HOME/projects/fixture/obsolete-claude-id.jsonl"
+printf '\n' | env \
+  AI_MEMORY_ACCEPTANCE_REPO="$REPO" \
+  AI_MEMORY_ACCEPTANCE_BIN="$BIN" \
+  AI_MEMORY_ACCEPTANCE_DATA="$DATA" \
+  AI_MEMORY_ACCEPTANCE_FAKE="$FAKE" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/adoption-claude-argv.log" \
+  CLAUDE_CONFIG_DIR="$ADOPTION_CLAUDE_HOME" \
+  script -qefc "$ADOPTION_RUNNER claude" /dev/null \
+    >"$LOGS/edge-adoption-claude.log" 2>&1
+mapfile -t adoption_claude_argv <"$TMP/adoption-claude-argv.log"
+[ "${adoption_claude_argv[0]:-}" = --session-id ] || {
+  printf 'established workstream did not create a fresh Claude session\n' >&2
+  exit 1
+}
+[ "${adoption_claude_argv[1]:-}" != obsolete-claude-id ] || {
+  printf 'established workstream adopted an obsolete Claude session\n' >&2
+  exit 1
+}
+
 if [ "$DETERMINISTIC_ONLY" = 1 ]; then
   printf 'deterministic managed-workstream acceptance passed\n'
   exit 0
@@ -189,9 +356,11 @@ OPENCODE_DATA_HOME="$CONFIG/opencode-xdg-data"
 PI_EXTENSION="$CONFIG/pi/ai-memory.ts"
 OMP_EXTENSION="$CONFIG/omp/ai-memory.ts"
 OMP_AGENT_DIR="$CONFIG/omp/agent"
+CRUSH_DATA_DIR="$CONFIG/crush/data"
 mkdir -p "$(dirname "$CLAUDE_SETTINGS")" "$(dirname "$CODEX_HOOKS")" \
   "$(dirname "$OPENCODE_PLUGIN")" "$(dirname "$PI_EXTENSION")" \
-  "$(dirname "$OMP_EXTENSION")" "$OMP_AGENT_DIR" "$OPENCODE_DATA_HOME/opencode"
+  "$(dirname "$OMP_EXTENSION")" "$OMP_AGENT_DIR" "$OPENCODE_DATA_HOME/opencode" \
+  "$CRUSH_DATA_DIR"
 
 # Redirect native transcript stores into the fixture while reusing only the
 # minimum authentication material required for real model calls.
@@ -318,6 +487,10 @@ run_harness() {
     pi)
       native_args=(-p --no-tools --no-extensions --extension "$PI_EXTENSION" --session-dir "$CONFIG/pi/sessions" "$prompt")
       [ -z "${AI_MEMORY_ACCEPTANCE_PI_MODEL:-}" ] || native_args=(-p --no-tools --no-extensions --extension "$PI_EXTENSION" --session-dir "$CONFIG/pi/sessions" --model "$AI_MEMORY_ACCEPTANCE_PI_MODEL" "$prompt")
+      ;;
+    crush)
+      native_args=(run --quiet --data-dir "$CRUSH_DATA_DIR" "$prompt")
+      [ -z "${AI_MEMORY_ACCEPTANCE_CRUSH_MODEL:-}" ] || native_args=(run --quiet --data-dir "$CRUSH_DATA_DIR" --model "$AI_MEMORY_ACCEPTANCE_CRUSH_MODEL" "$prompt")
       ;;
     omp)
       native_args=(-p --no-tools --extension "$OMP_EXTENSION" --session-dir "$CONFIG/omp/sessions" "$prompt")

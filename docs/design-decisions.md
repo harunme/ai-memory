@@ -283,10 +283,10 @@ Top-line rules carved into the codebase:
 ## 15. Managed workstreams use a portable ledger, not native format conversion
 
 Managed cross-harness continuity is explicitly opt-in through `ai-memory run`.
-Direct Claude Code, Codex, OpenCode, Pi, and OMP launches retain the existing
-hook and single-use handoff behavior. There is no process-global mode or manual
-harness switch: the wrapper selects the current repository/worktree workstream
-and each adapter applies that harness's native create/resume syntax.
+Direct Claude Code, Codex, OpenCode, Pi, Crush, and OMP launches retain the
+existing hook and single-use handoff behavior. There is no process-global mode
+or manual harness switch: the wrapper selects the current repository/worktree
+workstream and each adapter applies that harness's native create/resume syntax.
 
 One logical workstream owns one native session per harness plus an append-only
 portable event ledger. We rejected converting a Claude transcript into a fake
@@ -303,6 +303,27 @@ unseen delta; the full visible ledger stays searchable. Repository checkpoints
 are evidence at run boundaries and never commit, stash, reset, or otherwise
 mutate the checkout. The markdown wiki remains the durable knowledge surface;
 the managed ledger is an operational continuity substrate.
+
+Native-session adoption is restricted to bootstrapping an otherwise-empty
+workstream. The interactive launcher may offer recent sessions recorded for the
+same canonical checkout, but an explicit new workstream and noninteractive
+invocations start fresh. After any harness links a session or contributes
+portable history, server-side state disables adoption for every harness. This
+prevents a first Codex launch after Claude work from attaching an unrelated old
+Codex transcript; it creates a clean Codex session, injects the established
+ledger, and resumes that linked Codex session on later returns.
+
+Bare `ai-memory run` treats local timestamps as a bootstrap hint, not global
+precedence. Once a workstream is established, the server selects the most
+recently linked harness among the locally available candidates. This prevents a
+newer obsolete transcript file from overriding the logical workstream. When no
+checkout-local candidate exists, bare mode fails before creating server state.
+
+We also rejected automatic private-store rewrites after a checkout directory
+rename. Most harnesses persist absolute paths, there is no shared relocation
+API, and the server cannot distinguish a moved checkout from another clone of
+the same remote. Exact-path discovery and explicit native recovery are safer;
+Crush is the exception because its project-local database moves with the tree.
 
 This design follows the harness-format and session-portability experiments in
 the companion `ai-babel` research project: semantic continuity is portable,

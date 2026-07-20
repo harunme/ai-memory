@@ -180,9 +180,14 @@ pub struct RunArgs {
     /// Override the native harness executable path.
     #[arg(long)]
     pub executable: Option<PathBuf>,
-    /// Agent harness to launch.
+    /// Disable native permission prompts using the selected harness's
+    /// equivalent dangerous-mode option.
+    #[arg(long)]
+    pub yolo: bool,
+    /// Agent harness to launch. When omitted, continue the newest managed or
+    /// checkout-local session among the auto-detected harnesses.
     #[arg(value_enum)]
-    pub harness: RunHarnessChoice,
+    pub harness: Option<RunHarnessChoice>,
     /// Native harness arguments, forwarded byte-for-byte and in order.
     #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
     pub native_args: Vec<OsString>,
@@ -201,6 +206,8 @@ pub enum RunHarnessChoice {
     OpenCode,
     /// Pi coding agent.
     Pi,
+    /// Charmbracelet Crush.
+    Crush,
     /// Oh My Pi.
     #[value(alias = "oh-my-pi")]
     Omp,

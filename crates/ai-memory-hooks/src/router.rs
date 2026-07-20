@@ -1280,7 +1280,7 @@ fn render_handoff_markdown(h: &Handoff) -> String {
     buf
 }
 
-fn render_managed_context(
+pub(crate) fn render_managed_context(
     events: &[WorkstreamEvent],
     workstream_name: &str,
     workstream_id: ai_memory_core::WorkstreamId,

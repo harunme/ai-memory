@@ -50,7 +50,7 @@ pub use routing_snippet::{MARKER_END, MARKER_START, SNIPPET_BODY, find_marker_li
 pub use sanitize::{SanitizeConfig, Sanitized, Sanitizer};
 pub use user::{MAX_EMAIL_LEN, MAX_USERNAME_LEN, NewUser, User, validate_email, validate_username};
 pub use workstream::{
-    FinishManagedRunRequest, FinishManagedRunResponse, LinkManagedRunRequest, ManagedRunStatus,
-    NewWorkstreamEvent, PrepareManagedRunRequest, PrepareManagedRunResponse, WorkstreamCheckpoint,
-    WorkstreamEvent, WorkstreamEventKind,
+    FinishManagedRunRequest, FinishManagedRunResponse, LinkManagedRunRequest,
+    ManagedRunContextResponse, ManagedRunStatus, NewWorkstreamEvent, PrepareManagedRunRequest,
+    PrepareManagedRunResponse, WorkstreamCheckpoint, WorkstreamEvent, WorkstreamEventKind,
 };

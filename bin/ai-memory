@@ -197,7 +197,7 @@ cmd_upgrade() {
   touch "${VERSION_CHECK_FILE}"
 }
 
-# `ai-memory run` must execute on the host: Claude/Codex/OpenCode and their
+# `ai-memory run` must execute on the host: native harnesses and their
 # native transcript stores are host resources, not contents of the helper
 # container. Keep a checksum-verified release client beside the wrapper cache.
 native_run_binary() {
@@ -292,8 +292,9 @@ case "${1:-}" in
     exit 0
     ;;
   run)
+    shift
     NATIVE_RUN_BIN=$(native_run_binary)
-    exec "${NATIVE_RUN_BIN}" "$@"
+    exec "${NATIVE_RUN_BIN}" run "$@"
     ;;
 esac
 

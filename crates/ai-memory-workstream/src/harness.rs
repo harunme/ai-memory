@@ -18,6 +18,8 @@ pub enum ManagedHarness {
     OpenCode,
     /// Pi coding agent.
     Pi,
+    /// Charmbracelet Crush.
+    Crush,
     /// Oh My Pi.
     Omp,
 }
@@ -31,6 +33,7 @@ impl ManagedHarness {
             "codex" => Some(Self::Codex),
             "opencode" | "open-code" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
+            "crush" => Some(Self::Crush),
             "omp" | "oh-my-pi" => Some(Self::Omp),
             _ => None,
         }
@@ -44,6 +47,7 @@ impl ManagedHarness {
             Self::Codex => AgentKind::Codex,
             Self::OpenCode => AgentKind::OpenCode,
             Self::Pi => AgentKind::Pi,
+            Self::Crush => AgentKind::Crush,
             Self::Omp => AgentKind::Omp,
         }
     }
@@ -56,6 +60,7 @@ impl ManagedHarness {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
+            Self::Crush => "crush",
             Self::Omp => "omp",
         }
     }
@@ -68,6 +73,7 @@ impl ManagedHarness {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
+            Self::Crush => "crush",
             Self::Omp => "omp",
         }
     }
@@ -113,6 +119,7 @@ pub fn build_launch_plan(
     let mut args = native_args;
     let session_dir = match harness {
         ManagedHarness::Pi | ManagedHarness::Omp => flag_path(&args, &["--session-dir"]),
+        ManagedHarness::Crush => flag_path(&args, &["--data-dir", "-D"]),
         _ => None,
     }
     .or_else(|| environment_session_dir(harness));
@@ -172,6 +179,13 @@ pub fn build_launch_plan(
                 args.extend([OsString::from(selector), OsString::from(&id)]);
                 expected = Some(id);
             }
+            ManagedHarness::Crush => {
+                if let Some(id) = linked_session_id {
+                    args.insert(0, OsString::from(id));
+                    args.insert(0, OsString::from("--session"));
+                    expected = Some(id.to_string());
+                }
+            }
             ManagedHarness::Omp => {
                 if let Some(id) = linked_session_id {
                     args.push(OsString::from(format!("--resume={id}")));
@@ -188,6 +202,44 @@ pub fn build_launch_plan(
         session_dir,
         mode,
     })
+}
+
+/// Apply the wrapper-owned dangerous-mode flag using native harness syntax.
+/// Harnesses that already execute tools without a permission gate need no
+/// extra argument.
+pub fn apply_yolo(harness: ManagedHarness, args: &mut Vec<OsString>) {
+    let flag = match harness {
+        ManagedHarness::Claude => Some("--dangerously-skip-permissions"),
+        ManagedHarness::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
+        ManagedHarness::OpenCode => Some("--auto"),
+        ManagedHarness::Pi => Some("--approve"),
+        ManagedHarness::Crush => Some("--yolo"),
+        ManagedHarness::Omp => None,
+    };
+    if let Some(flag) = flag
+        && !has_flag(args, &[flag])
+    {
+        args.push(OsString::from(flag));
+    }
+}
+
+/// Whether a native invocation may use ai-memory's one-time adoption prompt.
+/// Explicit selectors and utility/ephemeral invocations always pass through.
+#[must_use]
+pub fn allows_native_session_adoption(harness: ManagedHarness, native_args: &[OsString]) -> bool {
+    launch_mode(harness, native_args) == LaunchMode::Session
+        && !has_explicit_session_selector(harness, native_args)
+        && !noninteractive_invocation(harness, native_args)
+}
+
+fn noninteractive_invocation(harness: ManagedHarness, args: &[OsString]) -> bool {
+    match harness {
+        ManagedHarness::Claude => has_flag(args, &["--print", "-p"]),
+        ManagedHarness::Codex => first_arg_is(args, "exec"),
+        ManagedHarness::OpenCode => first_arg_is(args, "run"),
+        ManagedHarness::Crush => first_arg_is(args, "run"),
+        ManagedHarness::Pi | ManagedHarness::Omp => has_flag(args, &["--print", "-p"]),
+    }
 }
 
 fn launch_mode(harness: ManagedHarness, args: &[OsString]) -> LaunchMode {
@@ -272,6 +324,21 @@ fn launch_mode(harness: ManagedHarness, args: &[OsString]) -> LaunchMode {
         ManagedHarness::Pi => {
             ["install", "remove", "uninstall", "update", "list", "config"].as_slice()
         }
+        ManagedHarness::Crush => [
+            "completion",
+            "dirs",
+            "help",
+            "login",
+            "logout",
+            "logs",
+            "models",
+            "projects",
+            "server",
+            "session",
+            "stats",
+            "update-providers",
+        ]
+        .as_slice(),
         ManagedHarness::Omp => [
             "acp",
             "agents",
@@ -328,6 +395,7 @@ fn has_explicit_session_selector(harness: ManagedHarness, args: &[OsString]) -> 
                 "--fork",
             ],
         ),
+        ManagedHarness::Crush => has_flag(args, &["--session", "-s", "--continue", "-C"]),
         ManagedHarness::Omp => has_flag(args, &["--resume", "-r", "--continue", "-c"]),
     }
 }
@@ -349,6 +417,7 @@ fn explicit_session_id(harness: ManagedHarness, args: &[OsString]) -> Option<Str
         }
         ManagedHarness::OpenCode => flag_value(args, &["--session", "-s"]),
         ManagedHarness::Pi => flag_value(args, &["--session", "--session-id"]),
+        ManagedHarness::Crush => flag_value(args, &["--session", "-s"]),
         ManagedHarness::Omp => flag_value(args, &["--resume", "-r"]),
     }
 }
@@ -427,6 +496,7 @@ fn environment_session_dir_with(
         ManagedHarness::OpenCode => value("XDG_DATA_HOME").map(|dir| dir.join("opencode")),
         ManagedHarness::Pi => value("PI_CODING_AGENT_SESSION_DIR")
             .or_else(|| value("PI_CODING_AGENT_DIR").map(|dir| dir.join("sessions"))),
+        ManagedHarness::Crush => None,
         ManagedHarness::Omp => value("PI_CODING_AGENT_DIR").map(|dir| dir.join("sessions")),
     }
 }
@@ -540,6 +610,46 @@ mod tests {
     }
 
     #[test]
+    fn adoption_is_only_allowed_for_session_launches_without_a_selector() {
+        assert!(allows_native_session_adoption(
+            ManagedHarness::Codex,
+            &[OsString::from("--yolo")]
+        ));
+        assert!(allows_native_session_adoption(
+            ManagedHarness::OpenCode,
+            &[OsString::from("--auto")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Codex,
+            &[OsString::from("resume")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Claude,
+            &[OsString::from("--continue")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Pi,
+            &[OsString::from("--no-session")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Codex,
+            &[OsString::from("login")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Codex,
+            &[OsString::from("exec"), OsString::from("continue here")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Claude,
+            &[OsString::from("--print"), OsString::from("continue here")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::OpenCode,
+            &[OsString::from("run"), OsString::from("continue here")]
+        ));
+    }
+
+    #[test]
     fn opencode_resume_places_selector_after_run_subcommand() {
         let plan = build_launch_plan(
             ManagedHarness::OpenCode,
@@ -581,6 +691,57 @@ mod tests {
             strings(&resumed.args),
             ["continue here", "--session", id.as_str()]
         );
+    }
+
+    #[test]
+    fn crush_resumes_linked_session_and_observes_data_directory() {
+        let plan = build_launch_plan(
+            ManagedHarness::Crush,
+            None,
+            vec![
+                OsString::from("--data-dir"),
+                OsString::from("/tmp/crush-data"),
+            ],
+            Some("crush-id"),
+        )
+        .unwrap();
+        assert_eq!(
+            strings(&plan.args),
+            ["--session", "crush-id", "--data-dir", "/tmp/crush-data"]
+        );
+        assert_eq!(plan.expected_session_id.as_deref(), Some("crush-id"));
+        assert_eq!(
+            plan.session_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/crush-data"))
+        );
+    }
+
+    #[test]
+    fn wrapper_yolo_uses_each_harness_native_flag_without_duplicates() {
+        for (harness, expected) in [
+            (
+                ManagedHarness::Claude,
+                Some("--dangerously-skip-permissions"),
+            ),
+            (
+                ManagedHarness::Codex,
+                Some("--dangerously-bypass-approvals-and-sandbox"),
+            ),
+            (ManagedHarness::OpenCode, Some("--auto")),
+            (ManagedHarness::Pi, Some("--approve")),
+            (ManagedHarness::Crush, Some("--yolo")),
+            (ManagedHarness::Omp, None),
+        ] {
+            let mut args = Vec::new();
+            apply_yolo(harness, &mut args);
+            apply_yolo(harness, &mut args);
+            assert_eq!(
+                strings(&args),
+                expected.into_iter().collect::<Vec<_>>(),
+                "{} yolo mapping",
+                harness.as_str()
+            );
+        }
     }
 
     #[test]

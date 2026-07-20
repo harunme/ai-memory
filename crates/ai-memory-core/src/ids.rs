@@ -198,6 +198,8 @@ pub enum AgentKind {
     /// Pi coding agent.
     #[serde(rename = "pi")]
     Pi,
+    /// Charmbracelet Crush coding agent.
+    Crush,
     /// xAI Grok Build CLI (`grok`).
     Grok,
     /// Zero coding agent (Gitlawb/zero).
@@ -216,7 +218,7 @@ impl AgentKind {
     /// CHECK constraint accepts every kind (the Zero integration shipped
     /// with the enum variant but without the V26 migration and only a
     /// live test caught it). Extend together with the enum.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::ClaudeCode,
         Self::Codex,
         Self::OpenCode,
@@ -227,6 +229,7 @@ impl AgentKind {
         Self::AntigravityCli,
         Self::Omp,
         Self::Pi,
+        Self::Crush,
         Self::Grok,
         Self::Zero,
         Self::Devin,
@@ -248,6 +251,7 @@ impl AgentKind {
             Self::AntigravityCli => "antigravity-cli",
             Self::Omp => "omp",
             Self::Pi => "pi",
+            Self::Crush => "crush",
             Self::Grok => "grok",
             Self::Zero => "zero",
             Self::Devin => "devin",
@@ -271,6 +275,7 @@ impl AgentKind {
             "openclaw" | "open-claw" => Self::OpenClaw,
             "antigravity-cli" | "antigravity" | "agy" => Self::AntigravityCli,
             "pi" => Self::Pi,
+            "crush" => Self::Crush,
             "omp" | "oh-my-pi" => Self::Omp,
             "grok" => Self::Grok,
             "zero" => Self::Zero,
@@ -297,7 +302,7 @@ impl AgentKind {
     /// should fail safe.
     #[must_use]
     pub fn session_start_injects_handoff(self) -> bool {
-        !matches!(self, Self::Grok | Self::Zero | Self::Other)
+        !matches!(self, Self::Crush | Self::Grok | Self::Zero | Self::Other)
     }
 }
 
@@ -441,6 +446,11 @@ mod tests {
             serde_json::from_str::<AgentKind>(&pi).unwrap(),
             AgentKind::Pi
         );
+
+        let crush = serde_json::to_string(&AgentKind::Crush).unwrap();
+        assert_eq!(crush, "\"crush\"");
+        assert_eq!(AgentKind::from_wire("crush"), AgentKind::Crush);
+        assert!(!AgentKind::Crush.session_start_injects_handoff());
 
         let openclaw = serde_json::to_string(&AgentKind::OpenClaw).unwrap();
         assert_eq!(openclaw, "\"openclaw\"");

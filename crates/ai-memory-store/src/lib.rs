@@ -3316,6 +3316,8 @@ mod tests {
             worktree_fingerprint: "worktree".into(),
             cwd: "/repo".into(),
             agent: AgentKind::Codex,
+            automatic_harness: false,
+            available_agents: Vec::new(),
             selection: WorkstreamSelection::Current,
             lease_owner: "test:1".into(),
         };
@@ -3324,6 +3326,7 @@ mod tests {
             .prepare_workstream_run(prepare.clone())
             .await
             .unwrap();
+        assert!(run.may_adopt_existing_session);
         let busy = store
             .writer
             .prepare_workstream_run(prepare.clone())
@@ -3413,6 +3416,7 @@ mod tests {
             .prepare_workstream_run(prepare.clone())
             .await
             .unwrap();
+        assert!(!next.may_adopt_existing_session);
         assert_eq!(next.workstream_id, run.workstream_id);
         assert_eq!(next.native_session_id.as_deref(), Some("native-1"));
         assert_eq!(next.source_cursor.as_deref(), Some("cursor-1"));
@@ -3501,6 +3505,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_adoption_stops_after_any_harness_links_the_workstream() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(workspace, "managed", None)
+            .await
+            .unwrap();
+        let prepare = |agent, owner: &str| PrepareWorkstreamRun {
+            workspace_id: workspace,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: owner.into(),
+        };
+
+        let blank = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::Codex, "blank"))
+            .await
+            .unwrap();
+        assert!(blank.may_adopt_existing_session);
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: blank.run_id,
+                native_session_id: None,
+                source_cursor: None,
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let first = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::ClaudeCode, "claude"))
+            .await
+            .unwrap();
+        assert!(
+            first.may_adopt_existing_session,
+            "a blank run with no native session or portable history remains adoptable"
+        );
+        assert!(
+            store
+                .writer
+                .link_managed_run_session(first.run_id, AgentKind::ClaudeCode, "claude-native")
+                .await
+                .unwrap()
+        );
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: first.run_id,
+                native_session_id: Some("claude-native".into()),
+                source_cursor: None,
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let codex = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::Codex, "codex"))
+            .await
+            .unwrap();
+        assert!(codex.native_session_id.is_none());
+        assert!(
+            !codex.may_adopt_existing_session,
+            "an established Claude workstream must start a fresh Codex session"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_run_prefers_newest_linked_available_harness() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(workspace, "managed", None)
+            .await
+            .unwrap();
+        let base = |agent, owner: &str| PrepareWorkstreamRun {
+            workspace_id: workspace,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: owner.into(),
+        };
+        let claude = store
+            .writer
+            .prepare_workstream_run(base(AgentKind::ClaudeCode, "claude"))
+            .await
+            .unwrap();
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: claude.run_id,
+                native_session_id: Some("claude-current".into()),
+                source_cursor: Some("cursor".into()),
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let mut automatic = base(AgentKind::Codex, "automatic");
+        automatic.automatic_harness = true;
+        automatic.available_agents = vec![AgentKind::Codex, AgentKind::ClaudeCode];
+        let resumed = store
+            .writer
+            .prepare_workstream_run(automatic)
+            .await
+            .unwrap();
+        assert_eq!(resumed.agent, AgentKind::ClaudeCode);
+        assert_eq!(resumed.native_session_id.as_deref(), Some("claude-current"));
+        assert_eq!(resumed.source_cursor.as_deref(), Some("cursor"));
+        assert!(!resumed.may_adopt_existing_session);
+    }
+
+    #[tokio::test]
     async fn managed_workstreams_are_isolated_across_workspaces() {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();
@@ -3529,6 +3681,8 @@ mod tests {
                     worktree_fingerprint: "same-worktree".into(),
                     cwd: "/same/path".into(),
                     agent: AgentKind::Codex,
+                    automatic_harness: false,
+                    available_agents: Vec::new(),
                     selection: WorkstreamSelection::Current,
                     lease_owner: workspace_name.into(),
                 })

@@ -125,6 +125,10 @@ What happens:
 Zero files move on disk because the disk path is keyed by
 `project_id`, not name. The web UI URL `/web/w/<ws>/<proj-name>/…`
 just resolves to the same `project_id` after the column update.
+This command also does not rename a source checkout or rewrite any native agent
+session locator. See [managed workstream rename
+behavior](managed-workstreams.md#project-and-directory-renames) before
+physically renaming a checkout that has native sessions.
 
 Failure modes:
 
