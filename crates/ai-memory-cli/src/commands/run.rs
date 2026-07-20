@@ -12,9 +12,9 @@ use ai_memory_core::{
     PrepareManagedRunResponse,
 };
 use ai_memory_workstream::{
-    ExportedTranscript, ManagedHarness, NativeSessionCandidate, allows_native_session_adoption,
-    apply_yolo, build_launch_plan, discover_native_session, export_transcript, inspect_repository,
-    list_native_sessions, wait_for_transcript_flush,
+    ExportedTranscript, LaunchMode, LaunchPlan, ManagedHarness, NativeSessionCandidate,
+    allows_native_session_adoption, apply_yolo, build_launch_plan, discover_native_session,
+    export_transcript, inspect_repository, list_native_sessions, wait_for_transcript_flush,
 };
 use anyhow::{Context as _, Result, anyhow};
 use tokio::process::Command;
@@ -195,7 +195,9 @@ pub async fn run(config: &Config, args: RunArgs) -> Result<i32> {
     if args.yolo || trailing_yolo {
         apply_yolo(harness, &mut plan.args);
     }
-    if let Some(native_session_id) = &plan.expected_session_id {
+    if plan.mode == LaunchMode::Session
+        && let Some(native_session_id) = &plan.expected_session_id
+    {
         post_json_no_content(
             &endpoint,
             &format!("{run_path}/link"),
@@ -207,7 +209,7 @@ pub async fn run(config: &Config, args: RunArgs) -> Result<i32> {
         .context("linking the managed native session; the agent was not started")?;
     }
 
-    let crush_context = if harness == ManagedHarness::Crush {
+    let crush_context = if harness == ManagedHarness::Crush && plan.mode == LaunchMode::Session {
         prepare_crush_context(&endpoint, &run_path, &home).await?
     } else {
         None
@@ -281,44 +283,41 @@ pub async fn run(config: &Config, args: RunArgs) -> Result<i32> {
     };
     let exit_code = status.code().unwrap_or(1);
 
-    let server_status = get_json::<ManagedRunStatus>(&endpoint, &run_path, &[])
-        .await
-        .ok();
-    let discovered_session = if plan.expected_session_id.is_none() {
-        discover_native_session(
+    let server_status = if plan.mode == LaunchMode::Session {
+        get_json::<ManagedRunStatus>(&endpoint, &run_path, &[])
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let native_session_id = resolve_native_session_after_run(
+        &plan,
+        harness,
+        &home,
+        &repository.cwd,
+        started_at,
+        server_status.as_ref(),
+    )
+    .await?;
+    let transcript = if plan.mode == LaunchMode::Session {
+        let source_cursor = if native_session_id.as_deref() == prepared.native_session_id.as_deref()
+        {
+            prepared.source_cursor.as_deref()
+        } else {
+            None
+        };
+        export_after_flush(
             harness,
             &home,
             &repository.cwd,
             plan.session_dir.as_deref(),
-            started_at,
+            native_session_id.as_deref(),
+            source_cursor,
         )
-        .await?
+        .await
     } else {
-        None
+        ExportedTranscript::default()
     };
-    let native_session_id = plan
-        .expected_session_id
-        .clone()
-        .or(discovered_session)
-        .or_else(|| {
-            server_status
-                .as_ref()
-                .and_then(|status| status.native_session_id.clone())
-        });
-    let source_cursor = if native_session_id.as_deref() == prepared.native_session_id.as_deref() {
-        prepared.source_cursor.as_deref()
-    } else {
-        None
-    };
-    let transcript = export_after_flush(
-        harness,
-        &home,
-        &repository.cwd,
-        plan.session_dir.as_deref(),
-        native_session_id.as_deref(),
-        source_cursor,
-    )
-    .await;
     let checkpoint = inspect_repository(&repository.cwd)
         .map(|identity| identity.checkpoint)
         .unwrap_or(repository.checkpoint);
@@ -331,7 +330,8 @@ pub async fn run(config: &Config, args: RunArgs) -> Result<i32> {
     )
     .await?;
 
-    if prepared.sync_through > prepared.sync_after
+    if plan.mode == LaunchMode::Session
+        && prepared.sync_through > prepared.sync_after
         && !server_status.is_some_and(|status| status.context_delivered)
     {
         eprintln!(
@@ -343,6 +343,26 @@ pub async fn run(config: &Config, args: RunArgs) -> Result<i32> {
         prepared.workstream_name
     );
     Ok(exit_code)
+}
+
+async fn resolve_native_session_after_run(
+    plan: &LaunchPlan,
+    harness: ManagedHarness,
+    home: &Path,
+    cwd: &Path,
+    started_at: SystemTime,
+    server_status: Option<&ManagedRunStatus>,
+) -> Result<Option<String>> {
+    if plan.mode == LaunchMode::Passthrough {
+        return Ok(None);
+    }
+    if let Some(native_session_id) = &plan.expected_session_id {
+        return Ok(Some(native_session_id.clone()));
+    }
+    let discovered =
+        discover_native_session(harness, home, cwd, plan.session_dir.as_deref(), started_at)
+            .await?;
+    Ok(discovered.or_else(|| server_status.and_then(|status| status.native_session_id.clone())))
 }
 
 async fn list_auto_sessions(home: &Path, cwd: &Path) -> Result<Vec<AutoSessionCandidate>> {
@@ -1020,6 +1040,65 @@ mod tests {
             .to_vec();
         assert!(remove_wrapper_yolo(&mut args));
         assert_eq!(args, ["resume", "native-id"].map(OsString::from));
+    }
+
+    #[tokio::test]
+    async fn utility_launch_does_not_adopt_a_recent_unrelated_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        let session_root = temp.path().join(".codex/sessions/2026/01/01");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&session_root).unwrap();
+        let started_at = SystemTime::now();
+        std::fs::write(
+            session_root.join("rollout-current.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": "unrelated-current", "cwd": cwd}
+                })
+            ),
+        )
+        .unwrap();
+
+        let utility = build_launch_plan(
+            ManagedHarness::Codex,
+            None,
+            vec![OsString::from("--version")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(utility.mode, LaunchMode::Passthrough);
+        assert!(
+            resolve_native_session_after_run(
+                &utility,
+                ManagedHarness::Codex,
+                temp.path(),
+                &cwd,
+                started_at,
+                None,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        let session = build_launch_plan(ManagedHarness::Codex, None, Vec::new(), None).unwrap();
+        assert_eq!(
+            resolve_native_session_after_run(
+                &session,
+                ManagedHarness::Codex,
+                temp.path(),
+                &cwd,
+                started_at,
+                None,
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some("unrelated-current")
+        );
     }
 
     #[test]

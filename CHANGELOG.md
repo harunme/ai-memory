@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions from contaminating later cross-harness switches.
 
 ### Fixed
+- Managed utility invocations such as `ai-memory run codex --version` no longer
+  discover and import a different process's recently updated native session.
+  Passthrough commands also do not fetch or acknowledge managed startup context.
 - Managed runs now verify the host harness executable before opening a server
   lease and report how to refresh a stale Docker wrapper. The wrapper path is
   regression-tested to preserve a remote `AI_MEMORY_SERVER_URL`, auth, and the

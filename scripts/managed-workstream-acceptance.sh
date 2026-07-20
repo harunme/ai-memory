@@ -112,6 +112,28 @@ EOF
 chmod +x "$FAKE"
 
 printf 'running deterministic wrapper edge checks\n'
+
+# Utility invocations must not discover and import another process's recent
+# session merely because it is active in the same checkout.
+UTILITY_CODEX_HOME="$CONFIG/utility-codex"
+mkdir -p "$UTILITY_CODEX_HOME/sessions/2026/01/01"
+printf '%s\n%s\n' \
+  "{\"type\":\"session_meta\",\"payload\":{\"id\":\"utility-unrelated\",\"cwd\":\"$REPO\"}}" \
+  '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"must not import"}]}}' \
+  >"$UTILITY_CODEX_HOME/sessions/2026/01/01/rollout-utility.jsonl"
+(
+  cd "$REPO"
+  CODEX_HOME="$UTILITY_CODEX_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/utility-argv.log" \
+    "$BIN" --data-dir "$DATA" run --new edge-utility --executable "$FAKE" \
+      codex --version >"$LOGS/edge-utility.log" 2>&1
+)
+diff -u <(printf '%s\n' --version) "$TMP/utility-argv.log"
+# The repository checkpoint is still recorded; the unrelated user message is
+# not. A buggy post-exit discovery path reports two imported events here.
+grep -q "workstream 'edge-utility' saved 1 new event(s)" "$LOGS/edge-utility.log"
+
 (
   cd "$REPO"
   AI_MEMORY_ACCEPTANCE_FAKE_MODE=argv \
