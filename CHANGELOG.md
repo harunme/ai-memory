@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-07-20
+
 ### Added
 - Optional managed cross-harness workstreams via `ai-memory run` for Claude
   Code, Codex, OpenCode, Pi, and OMP. Direct harness launches retain the legacy
@@ -2051,7 +2053,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.15.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.16.0...HEAD
+[1.16.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.16.0
 [1.15.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.15.0
 [1.14.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.14.0
 [1.13.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.13.0
