@@ -42,6 +42,12 @@ async fn main() -> Result<()> {
     let command = match command {
         Command::Hook(args) => return commands::hook::run(data_dir, args).await,
         Command::HookDrain(_args) => return commands::hook::run_drain(data_dir).await,
+        // Completions are pure text derived from the command tree. Emitting
+        // them must not require a loadable config or an initialised data dir
+        // (they are typically generated before `init`, or in a packaging
+        // step), and tracing must not get the chance to interleave anything
+        // into the script on stdout.
+        Command::Completions(args) => return commands::completions::run(args),
         other => other,
     };
 
@@ -118,5 +124,7 @@ async fn main() -> Result<()> {
         Command::Uninstall(args) => commands::uninstall::run(&config, args),
         Command::Auth(args) => commands::auth::run(&config, args).await,
         Command::User(args) => commands::user::run(&config, args).await,
+        // `Completions` is handled in the fast-path above (before config/tracing).
+        Command::Completions(args) => commands::completions::run(args),
     }
 }

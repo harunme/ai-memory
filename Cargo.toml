@@ -68,6 +68,10 @@ uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 # Config & CLI.
 figment = { version = "0.10", features = ["toml", "env"] }
 clap = { version = "4", features = ["derive", "env"] }
+# Shell-completion generator for `ai-memory completions <shell>`. Reads the
+# same derived `Command` the parser uses, so completions can never drift
+# from the actual CLI surface.
+clap_complete = "4"
 dirs = "5"
 # Format-preserving TOML editor for install-mcp --apply against
 # Codex's config.toml. Plain `toml` round-trips destroy comments;

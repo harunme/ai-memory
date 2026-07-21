@@ -405,6 +405,16 @@ For every client in the [Support Matrix](#support-matrix), plus curl-based hook
 installs, source builds, CLI environment variables, and the full subcommand
 reference, see [`docs/install.md`](docs/install.md).
 
+Tab completion for the CLI is available in bash, zsh, fish, PowerShell, and
+elvish:
+
+```bash
+ai-memory completions fish > ~/.config/fish/completions/ai-memory.fish
+```
+
+See [`docs/shell-completions.md`](docs/shell-completions.md) for the other
+shells' install paths.
+
 ## Security
 
 Loopback-only (`127.0.0.1:49374`) with no auth is the default because

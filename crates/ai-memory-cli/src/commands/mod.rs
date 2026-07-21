@@ -13,6 +13,7 @@ pub mod backup;
 pub mod bootstrap;
 pub mod checkpoints;
 pub mod commit;
+pub mod completions;
 pub mod curator;
 pub mod data_purge;
 pub mod delete_page;
