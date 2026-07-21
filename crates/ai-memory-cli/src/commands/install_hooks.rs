@@ -34,8 +34,22 @@ use crate::commands::render_shared::{
 };
 use crate::config::{Config, DEFAULT_SERVER_URL};
 
-/// `~/.claude/settings.json` — Claude Code hooks live under `hooks`.
+/// Claude Code's settings file — hooks live under `hooks`.
+/// `$CLAUDE_CONFIG_DIR/settings.json` when the var is set, else
+/// `~/.claude/settings.json`.
 pub(crate) fn claude_settings_path() -> anyhow::Result<std::path::PathBuf> {
+    claude_settings_path_in(std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// The env value comes in as a parameter so tests can exercise both
+/// branches without mutating process env (mirrors
+/// `install_mcp::kimi_code_home`).
+fn claude_settings_path_in(
+    env_override: Option<std::ffi::OsString>,
+) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(dir) = crate::commands::path_util::claude_config_dir(env_override) {
+        return Ok(dir.join("settings.json"));
+    }
     Ok(home_dir()
         .context("could not locate $HOME for ~/.claude/settings.json")?
         .join(".claude")
@@ -265,7 +279,18 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         AgentChoice::Omp => render_omp_extension(&server_url, auth, strategy),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_claude_code(&hooks_dir, &server_url, auth, &config.data_dir, strategy)
+            let settings_path = match &args.config_file {
+                Some(p) => p.clone(),
+                None => claude_settings_path()?,
+            };
+            render_claude_code(
+                &hooks_dir,
+                &server_url,
+                auth,
+                &config.data_dir,
+                strategy,
+                &settings_path,
+            )
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -2886,6 +2911,7 @@ fn render_claude_code(
     auth_token: Option<&str>,
     data_dir: &Path,
     project_strategy: Option<&str>,
+    settings_path: &Path,
 ) -> Result<()> {
     // Soft check: warn (don't bail) if a script is missing. The user
     // may be running this command inside docker against a host path
@@ -2913,12 +2939,18 @@ fn render_claude_code(
     );
     let serialized =
         serde_json::to_string_pretty(&payload).context("serializing claude code hook config")?;
-    println!("# Claude Code hook config — merge into ~/.claude/settings.json");
+    println!(
+        "# Claude Code hook config — merge into {}",
+        settings_path.display()
+    );
     println!("# Hook scripts: {}", hooks_dir.display());
     println!("# AI-memory server URL: {server_url}");
     if auth_token.is_some() {
         println!("# Auth: AI_MEMORY_AUTH_TOKEN embedded in each hook command below.");
-        println!("#       Treat ~/.claude/settings.json as sensitive (chmod 600).");
+        println!(
+            "#       Treat {} as sensitive (chmod 600).",
+            settings_path.display()
+        );
     }
     println!();
     println!("{serialized}");
@@ -5196,6 +5228,27 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
         )
         .unwrap();
         assert_eq!(second, ApplyOutcome::NoOp, "second apply must be a no-op");
+    }
+
+    #[test]
+    fn claude_settings_path_honours_claude_config_dir() {
+        let custom = if cfg!(windows) {
+            r"C:\custom\claude"
+        } else {
+            "/custom/claude"
+        };
+        let path = claude_settings_path_in(Some(std::ffi::OsString::from(custom))).unwrap();
+        assert_eq!(path, Path::new(custom).join("settings.json"));
+
+        // Empty override and unset var both fall back to ~/.claude/settings.json.
+        for env in [None, Some(std::ffi::OsString::new())] {
+            let path = claude_settings_path_in(env).unwrap();
+            assert!(
+                path.ends_with(Path::new(".claude").join("settings.json")),
+                "default must be ~/.claude/settings.json, got {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

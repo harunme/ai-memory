@@ -68,10 +68,11 @@ ai-memory install-mcp   --client claude-code --apply
 ai-memory install-hooks --agent  claude-code --apply
 ```
 
-If `CLAUDE_CONFIG_DIR` is set, `install-mcp --client claude-code` writes the
-MCP registration to `$CLAUDE_CONFIG_DIR/.claude.json` instead of
-`~/.claude.json`, matching Claude Code's own config resolution. `uninstall`
-sweeps the same path.
+If `CLAUDE_CONFIG_DIR` is set, the claude-code installers match Claude Code's
+own config resolution: `install-mcp` writes the MCP registration to
+`$CLAUDE_CONFIG_DIR/.claude.json` (instead of `~/.claude.json`) and
+`install-hooks` / `setup-agent` target `$CLAUDE_CONFIG_DIR/settings.json`
+(instead of `~/.claude/settings.json`). `uninstall` sweeps the same paths.
 
 The CLI commands (`bootstrap`, `status`, `search`, `lint`, `auto-improve`,
 `curator`, `pending-writes`, etc.) inherit the two env vars automatically. So do
