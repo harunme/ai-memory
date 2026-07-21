@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution for the hooks settings file: `$CLAUDE_CONFIG_DIR/settings.json`
   when set, else `~/.claude/settings.json`. Rendered output and the
   chmod-600 warning show the resolved path.
+- `install-skills --scope global` (claude-code root) installs to
+  `$CLAUDE_CONFIG_DIR/skills` when the variable is set, else
+  `~/.claude/skills`. `uninstall` sweeps the relocated root alongside the
+  home default so installs that predate the env var are still removed.
 
 ## [1.17.1] - 2026-07-20
 

@@ -327,11 +327,14 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
         let home = home_dir();
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
         let grok_home = install_mcp::grok_home().ok();
+        let claude_config_dir =
+            crate::commands::path_util::claude_config_dir(std::env::var_os("CLAUDE_CONFIG_DIR"));
         for root in skill_roots(
             &cwd,
             home.as_deref(),
             appdata.as_deref(),
             grok_home.as_deref(),
+            claude_config_dir.as_deref(),
         ) {
             for skill in MANAGED_SKILLS {
                 push_generated_delete(
@@ -351,8 +354,9 @@ fn skill_roots(
     home: Option<&Path>,
     appdata: Option<&Path>,
     grok_home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(9);
+    let mut roots = Vec::with_capacity(10);
     push_unique_skill_root(&mut roots, cwd.join(CLAUDE_SKILL_DIR).join(SKILLS_DIR));
     push_unique_skill_root(&mut roots, cwd.join(AGENTS_SKILL_DIR).join(SKILLS_DIR));
     push_unique_skill_root(&mut roots, cwd.join(DEVIN_SKILL_DIR).join(SKILLS_DIR));
@@ -370,6 +374,12 @@ fn skill_roots(
     // $HOME/.devin/skills — sweep it too or uninstall orphans those skills.
     if let Some(appdata) = appdata {
         push_unique_skill_root(&mut roots, appdata.join("devin").join(SKILLS_DIR));
+    }
+    // With CLAUDE_CONFIG_DIR set, global Claude Code skills install to
+    // `$CLAUDE_CONFIG_DIR/skills`. Sweep it alongside ~/.claude/skills —
+    // installs may predate the env var.
+    if let Some(claude_config_dir) = claude_config_dir {
+        push_unique_skill_root(&mut roots, claude_config_dir.join(SKILLS_DIR));
     }
     roots
 }
@@ -1089,13 +1099,13 @@ mod tests {
         let home = Path::new("/home/alice");
         let appdata = Path::new("C:/Users/Alice/AppData/Roaming");
 
-        let roots = skill_roots(cwd, Some(home), Some(appdata), None);
+        let roots = skill_roots(cwd, Some(home), Some(appdata), None, None);
         assert!(
             roots.contains(&appdata.join("devin").join(SKILLS_DIR)),
             "{roots:?}"
         );
 
-        let without = skill_roots(cwd, Some(home), None, None);
+        let without = skill_roots(cwd, Some(home), None, None, None);
         assert_eq!(
             without.len(),
             8,
@@ -1111,6 +1121,28 @@ mod tests {
         );
     }
 
+    /// `$CLAUDE_CONFIG_DIR/skills` is swept *in addition to*
+    /// `~/.claude/skills` — installs may predate the env var, so uninstall
+    /// must plan removal from both candidate roots.
+    #[test]
+    fn skill_roots_sweep_claude_config_dir_root_alongside_home() {
+        let roots = skill_roots(
+            Path::new("/repo"),
+            Some(Path::new("/home/alice")),
+            None,
+            None,
+            Some(Path::new("/stores/claude")),
+        );
+        assert!(
+            roots.contains(&PathBuf::from("/stores/claude/skills")),
+            "{roots:?}"
+        );
+        assert!(
+            roots.contains(&PathBuf::from("/home/alice/.claude/skills")),
+            "{roots:?}"
+        );
+    }
+
     #[test]
     fn skill_roots_use_injected_grok_home_override() {
         let roots = skill_roots(
@@ -1118,6 +1150,7 @@ mod tests {
             Some(Path::new("/home/alice")),
             None,
             Some(Path::new("/custom/grok")),
+            None,
         );
         assert!(
             roots.contains(&PathBuf::from("/custom/grok/skills")),
