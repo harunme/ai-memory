@@ -50,6 +50,11 @@ const DEFAULT_REVIEW_MAX_TOKENS: u32 = 16_000;
 const MAX_SESSION_PAGE_CHARS: usize = 32_000;
 const SAMPLE_LIMIT_WITH_SESSION_PAGE: usize = 48;
 const SAMPLE_LIMIT_WITHOUT_SESSION_PAGE: usize = 72;
+// Per-observation body cap in the reviewer projection. Note this is a SECOND,
+// tighter truncation than storage: the opt-in assistant/Stop excerpt (#196) is
+// persisted at up to 2 KB, but the reviewer only ever sees its first 1500 chars
+// here (head-biased). A late correction inside a long Stop body must fall within
+// this window to influence the reviewer.
 const MAX_OBSERVATION_BODY_CHARS: usize = 1_500;
 const PROMPT_SCAFFOLD_RESERVE_CHARS: usize = 4_000;
 const MAX_REJECTION_CONTEXT_CHARS: usize = 12_000;
