@@ -9,6 +9,7 @@
 #
 # Special wrapper-only subcommands (not forwarded to the binary):
 #   ai-memory upgrade       Pull the latest image + remind to re-stage hooks.
+#   ai-memory run ...       Use a cached native client so it can exec host agents.
 #
 # Env overrides:
 #   AI_MEMORY_IMAGE         docker image (default: akitaonrails/ai-memory:latest)
@@ -21,6 +22,7 @@
 #   COPILOT_GITHUB_TOKEN    GitHub token for AI_MEMORY_LLM_PROVIDER=copilot
 #   AI_MEMORY_NO_TTY=1      force non-interactive even on a real tty
 #   AI_MEMORY_NO_VERSION_CHECK=1  skip the once-per-day update check
+#   AI_MEMORY_NATIVE_BIN    native ai-memory binary used for `run` (optional)
 set -euo pipefail
 
 IMAGE="${AI_MEMORY_IMAGE:-akitaonrails/ai-memory:latest}"
@@ -109,6 +111,7 @@ cmd_upgrade() {
   fi
   echo "→ pulling ${IMAGE}"
   "${DOCKER}" pull "${IMAGE}"
+  rm -f "${CACHE_DIR}/native-runner/last-check"
 
   local found_agents=()
   if [ -d "${HOOKS_STAGE_DIR}" ]; then
@@ -194,6 +197,92 @@ cmd_upgrade() {
   touch "${VERSION_CHECK_FILE}"
 }
 
+# `ai-memory run` must execute on the host: native harnesses and their
+# native transcript stores are host resources, not contents of the helper
+# container. Keep a checksum-verified release client beside the wrapper cache.
+native_run_binary() {
+  if [ -n "${AI_MEMORY_NATIVE_BIN:-}" ]; then
+    [ -x "${AI_MEMORY_NATIVE_BIN}" ] || {
+      echo "ai-memory: AI_MEMORY_NATIVE_BIN is not executable: ${AI_MEMORY_NATIVE_BIN}" >&2
+      return 1
+    }
+    printf '%s\n' "${AI_MEMORY_NATIVE_BIN}"
+    return 0
+  fi
+
+  local os arch artifact base native_dir binary archive check_file need_refresh remote_sum local_sum tmp
+  case "$(uname -s 2>/dev/null || true)" in
+    Linux) os="linux" ;;
+    Darwin) os="macos" ;;
+    *)
+      echo "ai-memory: the Docker wrapper cannot provide managed host launches on this OS" >&2
+      echo "install the native release binary and run: ai-memory run <harness> ..." >&2
+      return 1
+      ;;
+  esac
+  case "$(uname -m 2>/dev/null || true)" in
+    x86_64 | amd64) arch="x86_64" ;;
+    aarch64 | arm64) arch="aarch64" ;;
+    *)
+      echo "ai-memory: no managed-run release binary is published for $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  artifact="ai-memory-${os}-${arch}"
+  base="https://github.com/akitaonrails/ai-memory/releases/latest/download/${artifact}.tar.gz"
+  native_dir="${CACHE_DIR}/native-runner"
+  binary="${native_dir}/ai-memory"
+  archive="${native_dir}/${artifact}.tar.gz"
+  check_file="${native_dir}/last-check"
+  mkdir -p "${native_dir}"
+
+  need_refresh=0
+  [ -x "${binary}" ] && [ -f "${archive}" ] || need_refresh=1
+  if [ "${need_refresh}" -eq 0 ] && { [ ! -f "${check_file}" ] || [ -n "$(find "${check_file}" -mtime +0 2>/dev/null)" ]; }; then
+    remote_sum=$(curl -fsSL "${base}.sha256" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+    if command -v sha256sum >/dev/null 2>&1; then
+      local_sum=$(sha256sum "${archive}" | awk '{ print $1 }')
+    else
+      local_sum=$(shasum -a 256 "${archive}" | awk '{ print $1 }')
+    fi
+    if [ -n "${remote_sum}" ] && [ "${remote_sum}" != "${local_sum}" ]; then
+      need_refresh=1
+    fi
+    touch "${check_file}"
+  fi
+
+  if [ "${need_refresh}" -eq 1 ]; then
+    command -v curl >/dev/null 2>&1 || {
+      echo "ai-memory: curl is required to install the native managed-run client" >&2
+      return 1
+    }
+    tmp="${native_dir}/.install-$$"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    echo "ai-memory: installing checksum-verified native managed-run client (${artifact})" >&2
+    curl -fsSL "${base}" -o "${tmp}/${artifact}.tar.gz"
+    curl -fsSL "${base}.sha256" -o "${tmp}/${artifact}.tar.gz.sha256"
+    if command -v sha256sum >/dev/null 2>&1; then
+      (cd "${tmp}" && sha256sum -c "${artifact}.tar.gz.sha256" >/dev/null)
+    else
+      remote_sum=$(awk 'NR == 1 { print $1 }' "${tmp}/${artifact}.tar.gz.sha256")
+      local_sum=$(shasum -a 256 "${tmp}/${artifact}.tar.gz" | awk '{ print $1 }')
+      [ "${remote_sum}" = "${local_sum}" ] || {
+        echo "ai-memory: native managed-run client checksum mismatch" >&2
+        rm -rf "${tmp}"
+        return 1
+      }
+    fi
+    tar -xzf "${tmp}/${artifact}.tar.gz" -C "${tmp}"
+    [ -x "${tmp}/ai-memory" ] || chmod +x "${tmp}/ai-memory"
+    mv "${tmp}/${artifact}.tar.gz" "${archive}"
+    mv "${tmp}/ai-memory" "${binary}"
+    rm -rf "${tmp}"
+    touch "${check_file}"
+  fi
+  printf '%s\n' "${binary}"
+}
+
 # ---- intercept wrapper-only subcommands ----------------------------------
 
 case "${1:-}" in
@@ -201,6 +290,11 @@ case "${1:-}" in
     shift
     cmd_upgrade
     exit 0
+    ;;
+  run)
+    shift
+    NATIVE_RUN_BIN=$(native_run_binary)
+    exec "${NATIVE_RUN_BIN}" run "$@"
     ;;
 esac
 
@@ -233,6 +327,7 @@ for var in \
   AI_MEMORY_EMBEDDING_BASE_URL \
   AI_MEMORY_EMBEDDING_DIM \
   AI_MEMORY_ALLOWED_HOSTS \
+  AI_MEMORY_WORKSTREAM_ID \
   AI_MEMORY_HOOK_PLATFORM \
   AI_MEMORY_HOOKS_HOST_ROOT \
   ANTHROPIC_API_KEY \

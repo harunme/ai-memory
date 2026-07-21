@@ -283,13 +283,13 @@ the `default` bucket entirely.
 
 ## Migrating existing projects
 
-Projects already created under workspace `default` stay there. Move
-one with the CLI:
+Projects already created under workspace `default` stay there. Move one to a
+different workspace with the CLI:
 
 ```sh
-ai-memory rename-project \
-    --workspace default --project foo \
-    --new-workspace movvia
+ai-memory move-project \
+    --from-workspace default --project foo \
+    --to-workspace movvia --confirm
 ```
 
 ## Install-wide default (no marker)

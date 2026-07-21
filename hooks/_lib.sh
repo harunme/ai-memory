@@ -67,6 +67,27 @@ ai_memory_extract_cwd() {
     ai_memory_json_unescape_path "$raw"
 }
 
+# Extract a harness-native session id from the common hook payload spellings.
+# Like the cwd fallback above this intentionally handles top-level JSON strings
+# only; native `ai-memory hook` uses a real JSON parser.
+ai_memory_extract_session_id() {
+    payload="${1:-$(cat)}"
+    for key in session_id sessionId sessionID session conversationId; do
+        rest=${payload#*\"$key\"}
+        if [ "$rest" != "$payload" ]; then
+            printf '%s' "$rest" \
+                | sed -n -E 's/^[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' \
+                | head -n 1
+            return 0
+        fi
+    done
+}
+
+ai_memory_managed_qs() {
+    [ -n "${AI_MEMORY_RUN_ID:-}" ] || return 0
+    printf '&managed_run=%s' "$(ai_memory_url_encode "$AI_MEMORY_RUN_ID")"
+}
+
 # Resolve cwd for agents whose native hook payload omits it. Payload wins,
 # then Devin's project env var, then the hook process cwd.
 ai_memory_resolve_cwd() {
@@ -142,7 +163,10 @@ ai_memory_repo_root_project() {
 # as the prior hook events even when no marker file exists.
 ai_memory_marker_qs() {
     cwd="$1"
-    [ -z "$cwd" ] && return 0
+    if [ -z "$cwd" ]; then
+        ai_memory_managed_qs
+        return 0
+    fi
     qs="&cwd=$(ai_memory_url_encode "$cwd")"
     ws=""
     pr=""
@@ -178,6 +202,7 @@ ai_memory_marker_qs() {
     # Per-project drop_subagent_captures opt-in: forward to the server, which
     # interprets truthiness (1/true/...) and scopes the drop to this project.
     [ -n "$ds" ] && qs="${qs}&drop_subagent=$(ai_memory_url_encode "$ds")"
+    qs="${qs}$(ai_memory_managed_qs)"
     printf '%s' "$qs"
 }
 

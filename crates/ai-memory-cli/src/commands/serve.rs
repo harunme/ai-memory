@@ -13,7 +13,8 @@ use ai_memory_core::{
     ActiveProject, ActorContext, PagePath, ProjectId, Sanitizer, SessionId, WorkspaceId,
 };
 use ai_memory_hooks::{
-    DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, HookState, ProjectCacheStore, hook_router,
+    DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, HookState, ProjectCacheStore, WorkstreamState, hook_router,
+    workstream_router,
 };
 use ai_memory_llm::{Embedder, LlmProvider, ProviderHealth, build_embedder, build_provider};
 use ai_memory_mcp::{AdminState, AiMemoryServer, ScopeInvalidation, admin_router};
@@ -410,6 +411,12 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 )),
                 home_dir: config.home_dir.clone(),
             });
+            let workstreams = workstream_router(WorkstreamState {
+                writer: store.writer.clone(),
+                reader: store.reader.clone(),
+                sanitizer: sanitizer.clone(),
+                data_dir: config.data_dir.clone(),
+            });
             let admin = admin_router(AdminState {
                 writer: store.writer.clone(),
                 reader: store.reader.clone(),
@@ -472,6 +479,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             let router = axum::Router::new()
                 .nest_service("/mcp", mcp_service)
                 .merge(hooks)
+                .merge(workstreams)
                 .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
                 .merge(admin.layer(DefaultBodyLimit::max(BOOTSTRAP_MAX_BODY_BYTES)));
             let base_path = normalize_prefix(&args.base_path);

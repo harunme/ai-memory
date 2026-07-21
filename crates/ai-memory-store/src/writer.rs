@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use ai_memory_core::{
-    AgentKind, HandoffId, NewHandoff, NewObservation, NewPage, NewSession, NewUser, ObservationId,
-    PageId, PagePath, ProjectId, SessionId, UserId, WorkspaceId,
+    AgentKind, HandoffId, ManagedRunId, NewHandoff, NewObservation, NewPage, NewSession, NewUser,
+    ObservationId, PageId, PagePath, ProjectId, SessionId, UserId, WorkspaceId,
 };
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
@@ -26,6 +26,9 @@ use crate::ops::{
     self, DeleteWorkspaceSummary, EmbeddingWrite, MoveSummary, PurgeSummary, ReorgSummary,
 };
 use crate::users::{self, TOKEN_HASH_LEN};
+use crate::workstream::{
+    FinishWorkstreamRun, FinishedWorkstreamRun, PrepareWorkstreamRun, PreparedWorkstreamRun,
+};
 
 /// Commands accepted by the writer thread.
 pub(crate) enum WriteCmd {
@@ -257,6 +260,32 @@ pub(crate) enum WriteCmd {
     RecordMaintenanceJobSuccess {
         job: crate::maintenance::MaintenanceJob,
         reply: oneshot::Sender<StoreResult<()>>,
+    },
+    PrepareWorkstreamRun {
+        input: PrepareWorkstreamRun,
+        reply: oneshot::Sender<StoreResult<PreparedWorkstreamRun>>,
+    },
+    HeartbeatManagedRun {
+        run_id: ManagedRunId,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    CancelManagedRun {
+        run_id: ManagedRunId,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    LinkManagedRunSession {
+        run_id: ManagedRunId,
+        agent: AgentKind,
+        native_session_id: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    AcceptManagedRunContext {
+        run_id: ManagedRunId,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    FinishWorkstreamRun {
+        input: FinishWorkstreamRun,
+        reply: oneshot::Sender<StoreResult<FinishedWorkstreamRun>>,
     },
     Shutdown,
 }
@@ -1028,6 +1057,70 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Select a workstream and open its single active managed-run lease.
+    pub async fn prepare_workstream_run(
+        &self,
+        input: PrepareWorkstreamRun,
+    ) -> StoreResult<PreparedWorkstreamRun> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::PrepareWorkstreamRun { input, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Extend a managed-run lease. Returns false for missing/stale runs.
+    pub async fn heartbeat_managed_run(&self, run_id: ManagedRunId) -> StoreResult<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::HeartbeatManagedRun { run_id, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Release a managed-run lease after a handled launcher failure.
+    pub async fn cancel_managed_run(&self, run_id: ManagedRunId) -> StoreResult<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::CancelManagedRun { run_id, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Attach the harness-native session observed by a managed SessionStart.
+    pub async fn link_managed_run_session(
+        &self,
+        run_id: ManagedRunId,
+        agent: AgentKind,
+        native_session_id: impl Into<String>,
+    ) -> StoreResult<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::LinkManagedRunSession {
+            run_id,
+            agent,
+            native_session_id: native_session_id.into(),
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Acknowledge successful SessionStart delivery for a managed run.
+    pub async fn accept_managed_run_context(&self, run_id: ManagedRunId) -> StoreResult<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::AcceptManagedRunContext { run_id, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Index an immutable transcript segment and release the run lease.
+    pub async fn finish_workstream_run(
+        &self,
+        input: FinishWorkstreamRun,
+    ) -> StoreResult<FinishedWorkstreamRun> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::FinishWorkstreamRun { input, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     async fn send(&self, cmd: WriteCmd) -> StoreResult<()> {
         self.inner
             .tx
@@ -1382,6 +1475,40 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::RecordMaintenanceJobSuccess { job, reply } => {
                 let result = crate::maintenance::record_success(&conn, job);
                 send_or_warn(reply, result, "record_maintenance_job_success");
+            }
+            WriteCmd::PrepareWorkstreamRun { input, reply } => {
+                let result = crate::workstream::prepare_run(&mut conn, &input);
+                send_or_warn(reply, result, "prepare_workstream_run");
+            }
+            WriteCmd::HeartbeatManagedRun { run_id, reply } => {
+                let result = crate::workstream::heartbeat(&mut conn, run_id);
+                send_or_warn(reply, result, "heartbeat_managed_run");
+            }
+            WriteCmd::CancelManagedRun { run_id, reply } => {
+                let result = crate::workstream::cancel_run(&mut conn, run_id);
+                send_or_warn(reply, result, "cancel_managed_run");
+            }
+            WriteCmd::LinkManagedRunSession {
+                run_id,
+                agent,
+                native_session_id,
+                reply,
+            } => {
+                let result = crate::workstream::link_native_session(
+                    &mut conn,
+                    run_id,
+                    agent,
+                    &native_session_id,
+                );
+                send_or_warn(reply, result, "link_managed_run_session");
+            }
+            WriteCmd::AcceptManagedRunContext { run_id, reply } => {
+                let result = crate::workstream::accept_context(&mut conn, run_id);
+                send_or_warn(reply, result, "accept_managed_run_context");
+            }
+            WriteCmd::FinishWorkstreamRun { input, reply } => {
+                let result = crate::workstream::finish_run(&mut conn, &input);
+                send_or_warn(reply, result, "finish_workstream_run");
             }
         }
     }

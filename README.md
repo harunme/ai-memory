@@ -30,6 +30,8 @@
 | Gemini CLI | Supported | MCP config + lifecycle hooks. |
 | Oh My Pi / OMP | Supported | Use `--client omp` / `--agent omp` (or `oh-my-pi`) for native `.omp` MCP config + TypeScript extension; generated extension enforces capture exclusions. |
 | Pi | Supported | Generated `~/.pi/agent/extensions/ai-memory.ts` extension provides lifecycle capture and an HTTP MCP bridge; generated extension enforces capture exclusions. |
+| Crush | Managed-only | `ai-memory run crush` resumes its project-local session database and supplies portable context through a temporary supported global-context file; no lifecycle-hook installer is provided. |
+| Managed workstreams | Opt-in | `ai-memory run` provides transparent cross-harness continuity for Claude Code, Codex, OpenCode, Pi, Crush, and OMP. Direct launches remain unchanged. See [`docs/managed-workstreams.md`](docs/managed-workstreams.md). |
 | Claude Desktop | MCP-only | Uses `mcp-remote`; no lifecycle hooks. |
 | OpenClaw | Supported | MCP config + native plugin lifecycle hooks; generated plugin enforces capture exclusions. |
 | Antigravity CLI | Supported | MCP config (`serverUrl`) + lifecycle hooks (`agy` alias). |
@@ -43,12 +45,12 @@
 
 ## What it is
 
-LLM coding agents lose all context when a session ends. ai-memory
-gives them a shared, persistent wiki: every prompt, tool call, and
-decision is captured automatically; when a session ends, the relevant
-pages get rewritten as a coherent narrative; when the next agent
-starts (Claude Code, Codex, OpenCode, …) it sees a handoff with
-"where you left off" already prepended.
+LLM coding agents lose context when a session ends. ai-memory gives them a
+shared, persistent wiki compiled from sanitized lifecycle observations. When a
+session ends, relevant observations become a coherent summary; the next agent
+receives a bounded handoff. Optional `ai-memory run` launches add a portable
+visible-event ledger and native per-harness resume for higher-fidelity
+cross-harness continuity.
 
 The wiki is plain markdown in a git repo - `grep`-able, openable in
 Obsidian, backed up with `rsync`. No vector database to babysit, no
@@ -58,8 +60,18 @@ priors are at the [bottom](#influences-and-prior-art).
 
 ## Key features
 
-- **Zero-friction capture.** Lifecycle hooks fire-and-forget every
-  prompt + tool call + session boundary. You never type `write_note`.
+- **Zero-friction lifecycle capture.** Hooks fire-and-forget bounded,
+  sanitized prompt, tool-lifecycle, and session-boundary observations. Direct
+  launches keep this lightweight path; it is not a complete native transcript.
+- **Opt-in managed workstreams.** `ai-memory run claude`, then `ai-memory run
+  codex --yolo`, transparently resumes one logical workstream with native
+  per-harness sessions, a portable visible-event ledger, and full-ledger search.
+  `ai-memory run` with no harness continues the newest usable Claude Code,
+  Codex, OpenCode, Pi, or Crush session for this checkout. On first explicit use,
+  an interactive launcher can adopt a previous session from the same checkout;
+  later switches cannot select unrelated native history. Native arguments pass
+  through unchanged except the wrapper-owned `--yolo`; direct commands are
+  unaffected.
 - **Per-repository capture exclusions.** A nearest-marker `[capture]`
   `ignore_paths` policy drops matching recognized file-tool events before they
   reach the local spool or server. See [the capture policy reference](docs/marker-file.md#capture-exclusions).
@@ -120,6 +132,29 @@ priors are at the [bottom](#influences-and-prior-art).
 
 ## Use cases
 
+- **"Quit Claude Code and continue the same work in Codex."** Use the optional
+  managed launcher when you want native session resume plus the portable visible
+  history, not only a summary handoff:
+
+  ```bash
+  cd /path/to/project
+  ai-memory run claude
+
+  # Quit Claude Code, then continue the same workstream in Codex.
+  ai-memory run codex --yolo
+
+  # Later, omit the name to resume the newest usable managed session here.
+  ai-memory run
+  ```
+
+  The first explicit run can offer an existing session from this exact checkout
+  or start a new one. Switching harnesses starts or resumes the native session
+  linked to the shared workstream, so an obsolete local session cannot replace
+  newer cross-harness history. After a normal quit, the next launch waits
+  briefly if the previous launcher is still finalizing; handled failures release
+  the workstream immediately. Managed mode currently covers Claude Code, Codex,
+  OpenCode, Pi, Crush, and OMP; direct harness launches remain unchanged. See
+  [Managed cross-harness workstreams](docs/managed-workstreams.md).
 - **"Quit at 4 PM, pick up at 9 AM in a different agent."** The
   classic. SessionStart hook in the next supported hook client prepends a
   typed handoff with open questions, next steps, and a session summary. Grok
@@ -244,7 +279,7 @@ it. Adding a bearer token is a one-line change once you're ready to
 expose the server on the LAN; see [Security](#security) below.
 
 ```bash
-# 1. Install the ai-memory CLI wrapper (a ~3 KB shell script that
+# 1. Install the ai-memory CLI wrapper (a small shell script that
 #    runs the binary inside docker with your $HOME mounted). This is
 #    the only thing that needs to live on the host filesystem.
 mkdir -p ~/.local/bin
@@ -313,6 +348,17 @@ The Docker wrapper also bridges thin-client commands such as
 loopback server. With the local Docker quick start above, no
 `AI_MEMORY_SERVER_URL` override is needed.
 
+Managed workstreams are optional. They execute the harness on the host while
+the server may remain local or remote:
+
+```bash
+ai-memory run claude
+# later, continue the same workstream in another harness
+ai-memory run codex --yolo
+# omit the name to continue the newest usable local harness session
+ai-memory run
+```
+
 To remove ai-memory later, run `ai-memory uninstall --apply` from the
 same host environment. It removes ai-memory-owned config entries, instruction
 blocks, default-root managed skill files, and generated plugin files only after
@@ -337,6 +383,12 @@ one matching entry.
   MCP/hooks. Explicit `--server-url` flags still work, but are no longer
   required when the env vars are set. Any non-loopback server should use
   bearer auth.
+- **Managed-run wrapper:** `ai-memory run` must be intercepted by the current
+  host wrapper so the native harness and its session store remain accessible.
+  An old wrapper may pass `run` into Docker and fail with `No such file or
+  directory` for `codex`, `claude`, or another host executable. Run
+  `ai-memory upgrade` on the agent machine to refresh it. The host-native runner
+  inherits `AI_MEMORY_SERVER_URL`, `AI_MEMORY_AUTH_TOKEN`, and the host `PATH`.
 - **Upgrades:** for Docker-wrapper installs, run `ai-memory upgrade` on each
   agent machine. It refreshes the local wrapper, pulls the latest image, and
   re-stages hook scripts under `~/.local/share/ai-memory/hooks/<agent>/`.
@@ -605,7 +657,7 @@ One Rust binary runs an MCP/HTTP server and owns one data directory:
 ```text
 <data_dir>/
 ├── wiki/    # markdown source of truth, git-versioned
-├── raw/     # immutable session log archive
+├── raw/     # immutable sanitized managed-workstream transcript segments
 ├── db/      # SQLite indexes, including FTS5 and embeddings
 ├── models/  # reserved for local embedding models
 └── logs/    # rolling tracing output
@@ -625,6 +677,8 @@ diagram, crate breakdown, schema notes, and invariants.
 |---|---|
 | [`docs/install.md`](docs/install.md) | **Installation cookbook.** Every agent CLI, every alternative (curl, source build, no-docker, no-auth), and the server-on-a-different-machine (homelab/LAN) walkthrough. Read after the Quick start if your setup doesn't match the happy path. |
 | [`docs/usage.md`](docs/usage.md) | Handoffs, proactive memory queries, slim routing snippet + managed Agent Skills, migration from other memory tools, web UI, raw-wiki inspection, and rules-vs-facts workflow. |
+| [`docs/managed-workstreams.md`](docs/managed-workstreams.md) | Optional `ai-memory run` continuity across Claude Code, Codex, OpenCode, Pi, Crush, and OMP: automatic harness selection, native resume, argument forwarding, ledger search, privacy, and recovery. |
+| [`docs/managed-harness-contributions.md`](docs/managed-harness-contributions.md) | Protocol and acceptance bar for contributors adding managed resume, read-only transcript import, and startup context delivery to another harness. |
 | [`docs/marker-file.md`](docs/marker-file.md) | `.ai-memory.toml` workspace/project routing for multi-client trees, mono-repos, worktrees, and work/personal separation. |
 | [`docs/auto-scope.md`](docs/auto-scope.md) | `[auto_scope]` modes for shared servers: default single-slot routing, session-aware isolation, and multi-user `per_actor` behavior. |
 | [`docs/macos.md`](docs/macos.md) | macOS install paths: native release binary (recommended), source build, the Docker wrapper, hook-platform notes, and current macOS limitations. |

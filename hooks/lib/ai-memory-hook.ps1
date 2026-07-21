@@ -189,6 +189,9 @@ function Invoke-AiMemoryHook {
     $Payload = Read-AiMemoryStdin
     $Cwd = Resolve-AiMemoryCwd -Payload $Payload -Agent $Agent
     $QS = Get-AiMemoryMarkerQuery -Cwd $Cwd
+    if ($env:AI_MEMORY_RUN_ID) {
+        $QS += "&managed_run=$([Uri]::EscapeDataString($env:AI_MEMORY_RUN_ID))"
+    }
     $SessionQS = ""
     if ($Agent -eq "devin") {
         $SessionQS = Get-AiMemorySessionIdQuery -Agent $Agent -Event $Event
@@ -215,11 +218,26 @@ function Invoke-AiMemoryHook {
     }
 
     if ($FetchHandoff) {
+        $NativeSessionQS = ""
+        try {
+            $ParsedPayload = $Payload | ConvertFrom-Json
+            $NativeSessionId = @(
+                $ParsedPayload.session_id,
+                $ParsedPayload.sessionId,
+                $ParsedPayload.sessionID,
+                $ParsedPayload.session,
+                $ParsedPayload.conversationId
+            ) | Where-Object { $_ } | Select-Object -First 1
+            if ($NativeSessionId) {
+                $NativeSessionQS = "&session_id=$([Uri]::EscapeDataString([string]$NativeSessionId))"
+            }
+        } catch {
+        }
         try {
             $Response = Invoke-WebRequest `
                 -UseBasicParsing `
                 -TimeoutSec 2 `
-                -Uri "$Server/handoff?agent=$Agent$QS" `
+                -Uri "$Server/handoff?agent=$Agent$QS$NativeSessionQS" `
                 -Headers $Headers
             if ($null -ne $Response -and $Response.Content) {
                 if ($AntigravityPreInvocationOutput) {

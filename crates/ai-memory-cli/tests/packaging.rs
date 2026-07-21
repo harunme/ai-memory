@@ -204,6 +204,73 @@ fn macos_wrapper_routes_urls_by_real_subcommand() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn managed_run_wrapper_uses_host_binary_path_and_remote_server_without_docker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let native = tmp.path().join("native-ai-memory");
+    let docker = tmp.path().join("docker");
+    let record = tmp.path().join("native-record.txt");
+    let docker_record = tmp.path().join("docker-record.txt");
+    std::fs::write(
+        &native,
+        format!(
+            "#!/usr/bin/env bash\n\
+             printf 'server=%s\\nauth=%s\\npath=%s\\n' \"$AI_MEMORY_SERVER_URL\" \"$AI_MEMORY_AUTH_TOKEN\" \"$PATH\" > {}\n\
+             printf 'arg=%s\\n' \"$@\" >> {}\n",
+            shell_path(&record),
+            shell_path(&record)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &docker,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {}\nexit 99\n",
+            shell_path(&docker_record)
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let host_path = format!(
+        "{}:{}",
+        shell_path(tmp.path()),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = shell_script_command(&repo_root().join("bin/ai-memory"))
+        .args(["run", "codex", "--yolo", "resume"])
+        .env("AI_MEMORY_NATIVE_BIN", &native)
+        .env("AI_MEMORY_DOCKER", &docker)
+        .env("AI_MEMORY_SERVER_URL", "http://192.168.0.90:49374")
+        .env("AI_MEMORY_AUTH_TOKEN", "remote-test-token")
+        .env("PATH", &host_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record = std::fs::read_to_string(record).unwrap();
+    assert_eq!(
+        record,
+        format!(
+            "server=http://192.168.0.90:49374\n\
+             auth=remote-test-token\n\
+             path={host_path}\n\
+             arg=run\n\
+             arg=codex\n\
+             arg=--yolo\n\
+             arg=resume\n"
+        )
+    );
+    assert!(!docker_record.exists(), "managed run entered Docker");
+}
+
 // Unlike run_wrapper_on_fake_macos's docker fake (which only ever sees one
 // meaningful call — the final `docker run`), the rootless-Docker UID check
 // calls `docker info` *before* `docker run`, so this fake must dispatch on

@@ -22,6 +22,7 @@ mod ops;
 mod reader;
 mod scope;
 pub mod users;
+mod workstream;
 mod writer;
 
 pub use fts_query::prepare_fts5_query;
@@ -52,6 +53,10 @@ pub use scope::{
     lookup_global_scope, resolve_many_existing_scopes,
 };
 pub use users::{TOKEN_HASH_LEN, TOKEN_RAW_LEN, TokenPepper, generate_token, hash_token};
+pub use workstream::{
+    FinishWorkstreamRun, FinishedWorkstreamRun, ManagedRunContext, PrepareWorkstreamRun,
+    PreparedWorkstreamRun, StoredManagedRunStatus, WorkstreamSelection,
+};
 pub use writer::WriterHandle;
 
 /// Filename used inside the data dir's `db/` subdirectory.
@@ -114,8 +119,9 @@ impl Store {
 mod tests {
     use super::*;
     use ai_memory_core::{
-        ActorContext, AgentKind, LinkTarget, NewObservation, NewPage, NewSession, ObservationId,
-        ObservationKind, PageId, PagePath, ProjectId, SessionId, Tier, UserId, WorkspaceId,
+        ActorContext, AgentKind, LinkTarget, NewObservation, NewPage, NewSession,
+        NewWorkstreamEvent, ObservationId, ObservationKind, PageId, PagePath, ProjectId, SessionId,
+        Tier, UserId, WorkspaceId, WorkstreamEventKind,
     };
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
@@ -3287,5 +3293,497 @@ mod tests {
             .await
             .unwrap();
         assert!(mismatch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_workstream_batches_are_idempotent_and_release_the_lease() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(ws, "managed", None)
+            .await
+            .unwrap();
+        let prepare = PrepareWorkstreamRun {
+            workspace_id: ws,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent: AgentKind::Codex,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: "test:1".into(),
+        };
+        let run = store
+            .writer
+            .prepare_workstream_run(prepare.clone())
+            .await
+            .unwrap();
+        assert!(run.may_adopt_existing_session);
+        let busy = store
+            .writer
+            .prepare_workstream_run(prepare.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(busy, StoreError::WorkstreamBusy(_)));
+        assert!(
+            store
+                .writer
+                .link_managed_run_session(run.run_id, AgentKind::Codex, "native-1")
+                .await
+                .unwrap()
+        );
+
+        let event = NewWorkstreamEvent {
+            event_id: "event-1".into(),
+            agent: AgentKind::Codex,
+            native_session_id: "native-1".into(),
+            source_record_id: Some("record-1".into()),
+            kind: WorkstreamEventKind::Message,
+            role: Some("assistant".into()),
+            content: "portable context".into(),
+            occurred_at: None,
+            metadata: serde_json::json!({}),
+        };
+        let partial = FinishWorkstreamRun {
+            run_id: run.run_id,
+            native_session_id: Some("native-1".into()),
+            source_cursor: None,
+            events: vec![event.clone()],
+            complete: false,
+            segment_path: Some("segment-1.jsonl".into()),
+            exit_code: None,
+        };
+        assert_eq!(
+            store
+                .writer
+                .finish_workstream_run(partial.clone())
+                .await
+                .unwrap()
+                .imported_events,
+            1
+        );
+        assert_eq!(
+            store
+                .writer
+                .finish_workstream_run(partial)
+                .await
+                .unwrap()
+                .imported_events,
+            0
+        );
+        assert_eq!(
+            store
+                .reader
+                .managed_run_status(run.run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "active"
+        );
+
+        let finished = store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: run.run_id,
+                native_session_id: Some("native-1".into()),
+                source_cursor: Some("cursor-1".into()),
+                events: vec![event],
+                complete: true,
+                segment_path: Some("segment-final.jsonl".into()),
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+        assert_eq!(finished.imported_events, 0);
+        let search = store
+            .reader
+            .search_workstream_events(run.workstream_id, "portable".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].event_id, "event-1");
+        let next = store
+            .writer
+            .prepare_workstream_run(prepare.clone())
+            .await
+            .unwrap();
+        assert!(!next.may_adopt_existing_session);
+        assert_eq!(next.workstream_id, run.workstream_id);
+        assert_eq!(next.native_session_id.as_deref(), Some("native-1"));
+        assert_eq!(next.source_cursor.as_deref(), Some("cursor-1"));
+        assert_eq!(next.sync_through, 1);
+        assert!(
+            store
+                .writer
+                .link_managed_run_session(next.run_id, AgentKind::Codex, "native-2")
+                .await
+                .unwrap()
+        );
+        let fresh_context = store
+            .reader
+            .managed_run_context(next.run_id, 256)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh_context.sync_after, 0);
+        assert_eq!(fresh_context.events.len(), 1);
+        assert!(
+            store
+                .writer
+                .accept_managed_run_context(next.run_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .writer
+                .link_managed_run_session(next.run_id, AgentKind::Codex, "native-3")
+                .await
+                .unwrap(),
+            "a delivered run must not be rebound by a nested same-agent process"
+        );
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: next.run_id,
+                native_session_id: Some("native-2".into()),
+                source_cursor: Some("cursor-2".into()),
+                events: Vec::new(),
+                complete: true,
+                segment_path: Some("segment-native-2.jsonl".into()),
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+        let retry = store
+            .writer
+            .prepare_workstream_run(prepare.clone())
+            .await
+            .unwrap();
+        assert_eq!(retry.native_session_id.as_deref(), Some("native-2"));
+        assert_eq!(
+            retry.sync_after, 1,
+            "delivered context must stay acknowledged"
+        );
+        assert_eq!(retry.sync_through, 1);
+        assert!(
+            store
+                .writer
+                .link_managed_run_session(retry.run_id, AgentKind::Codex, "native-3")
+                .await
+                .unwrap()
+        );
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: retry.run_id,
+                native_session_id: Some("native-3".into()),
+                source_cursor: Some("cursor-3".into()),
+                events: Vec::new(),
+                complete: true,
+                segment_path: Some("segment-native-3.jsonl".into()),
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+        let undelivered = store.writer.prepare_workstream_run(prepare).await.unwrap();
+        assert_eq!(undelivered.native_session_id.as_deref(), Some("native-3"));
+        assert_eq!(
+            undelivered.sync_after, 0,
+            "undelivered context must be retried"
+        );
+        assert_eq!(undelivered.sync_through, 1);
+    }
+
+    #[tokio::test]
+    async fn managed_run_cancel_releases_the_lease_immediately() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(workspace, "managed-cancel", None)
+            .await
+            .unwrap();
+        let prepare = PrepareWorkstreamRun {
+            workspace_id: workspace,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent: AgentKind::Codex,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: "test:1".into(),
+        };
+        let first = store
+            .writer
+            .prepare_workstream_run(prepare.clone())
+            .await
+            .unwrap();
+        assert!(
+            store
+                .writer
+                .prepare_workstream_run(prepare.clone())
+                .await
+                .is_err()
+        );
+        assert!(store.writer.cancel_managed_run(first.run_id).await.unwrap());
+        assert!(
+            !store.writer.cancel_managed_run(first.run_id).await.unwrap(),
+            "cancel is idempotent once the run is no longer active"
+        );
+        assert_eq!(
+            store
+                .reader
+                .managed_run_status(first.run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "expired"
+        );
+        store.writer.prepare_workstream_run(prepare).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_adoption_stops_after_any_harness_links_the_workstream() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(workspace, "managed", None)
+            .await
+            .unwrap();
+        let prepare = |agent, owner: &str| PrepareWorkstreamRun {
+            workspace_id: workspace,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: owner.into(),
+        };
+
+        let blank = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::Codex, "blank"))
+            .await
+            .unwrap();
+        assert!(blank.may_adopt_existing_session);
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: blank.run_id,
+                native_session_id: None,
+                source_cursor: None,
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let first = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::ClaudeCode, "claude"))
+            .await
+            .unwrap();
+        assert!(
+            first.may_adopt_existing_session,
+            "a blank run with no native session or portable history remains adoptable"
+        );
+        assert!(
+            store
+                .writer
+                .link_managed_run_session(first.run_id, AgentKind::ClaudeCode, "claude-native")
+                .await
+                .unwrap()
+        );
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: first.run_id,
+                native_session_id: Some("claude-native".into()),
+                source_cursor: None,
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let codex = store
+            .writer
+            .prepare_workstream_run(prepare(AgentKind::Codex, "codex"))
+            .await
+            .unwrap();
+        assert!(codex.native_session_id.is_none());
+        assert!(
+            !codex.may_adopt_existing_session,
+            "an established Claude workstream must start a fresh Codex session"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_run_prefers_newest_linked_available_harness() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let workspace = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let project = store
+            .writer
+            .get_or_create_project(workspace, "managed", None)
+            .await
+            .unwrap();
+        let base = |agent, owner: &str| PrepareWorkstreamRun {
+            workspace_id: workspace,
+            project_id: project,
+            repo_fingerprint: "repo".into(),
+            worktree_fingerprint: "worktree".into(),
+            cwd: "/repo".into(),
+            agent,
+            automatic_harness: false,
+            available_agents: Vec::new(),
+            selection: WorkstreamSelection::Current,
+            lease_owner: owner.into(),
+        };
+        let claude = store
+            .writer
+            .prepare_workstream_run(base(AgentKind::ClaudeCode, "claude"))
+            .await
+            .unwrap();
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: claude.run_id,
+                native_session_id: Some("claude-current".into()),
+                source_cursor: Some("cursor".into()),
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let mut automatic = base(AgentKind::Codex, "automatic");
+        automatic.automatic_harness = true;
+        automatic.available_agents = vec![AgentKind::Codex, AgentKind::ClaudeCode];
+        let resumed = store
+            .writer
+            .prepare_workstream_run(automatic)
+            .await
+            .unwrap();
+        assert_eq!(resumed.agent, AgentKind::ClaudeCode);
+        assert_eq!(resumed.native_session_id.as_deref(), Some("claude-current"));
+        assert_eq!(resumed.source_cursor.as_deref(), Some("cursor"));
+        assert!(!resumed.may_adopt_existing_session);
+    }
+
+    #[tokio::test]
+    async fn managed_workstreams_are_isolated_across_workspaces() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let mut runs = Vec::new();
+
+        for (workspace_name, content) in [
+            ("workspace-a", "only visible in workspace a"),
+            ("workspace-b", "only visible in workspace b"),
+        ] {
+            let workspace = store
+                .writer
+                .get_or_create_workspace(workspace_name)
+                .await
+                .unwrap();
+            let project = store
+                .writer
+                .get_or_create_project(workspace, "shared-name", None)
+                .await
+                .unwrap();
+            let run = store
+                .writer
+                .prepare_workstream_run(PrepareWorkstreamRun {
+                    workspace_id: workspace,
+                    project_id: project,
+                    repo_fingerprint: "same-repository".into(),
+                    worktree_fingerprint: "same-worktree".into(),
+                    cwd: "/same/path".into(),
+                    agent: AgentKind::Codex,
+                    automatic_harness: false,
+                    available_agents: Vec::new(),
+                    selection: WorkstreamSelection::Current,
+                    lease_owner: workspace_name.into(),
+                })
+                .await
+                .unwrap();
+            store
+                .writer
+                .finish_workstream_run(FinishWorkstreamRun {
+                    run_id: run.run_id,
+                    native_session_id: Some(format!("native-{workspace_name}")),
+                    source_cursor: Some("cursor".into()),
+                    events: vec![NewWorkstreamEvent {
+                        event_id: "same-native-event-id".into(),
+                        agent: AgentKind::Codex,
+                        native_session_id: format!("native-{workspace_name}"),
+                        source_record_id: None,
+                        kind: WorkstreamEventKind::Message,
+                        role: Some("assistant".into()),
+                        content: content.into(),
+                        occurred_at: None,
+                        metadata: serde_json::json!({}),
+                    }],
+                    complete: true,
+                    segment_path: None,
+                    exit_code: Some(0),
+                })
+                .await
+                .unwrap();
+            runs.push(run);
+        }
+
+        assert_ne!(runs[0].workstream_id, runs[1].workstream_id);
+        let first = store
+            .reader
+            .search_workstream_events(runs[0].workstream_id, "visible".into(), 10)
+            .await
+            .unwrap();
+        let second = store
+            .reader
+            .search_workstream_events(runs[1].workstream_id, "visible".into(), 10)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].content, "only visible in workspace a");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content, "only visible in workspace b");
     }
 }

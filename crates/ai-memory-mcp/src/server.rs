@@ -167,8 +167,10 @@ cannot forward the real agent session id automatically; pass explicit \
 `workspace` + `project` / `scopes`, or use a session-aware bridge that \
 forwards the lifecycle-hook session id on MCP calls.\n\
 \n\
-Lifecycle hooks already capture every prompt + tool call automatically \
-— you do NOT need to write routine notes by hand. When the user \
+Lifecycle hooks already capture sanitized, bounded prompt and tool-lifecycle \
+observations automatically. They are not complete native transcripts; managed \
+`ai-memory run` launches add the portable visible-event ledger. You do NOT \
+need to write routine notes by hand. When the user \
 explicitly asks to remember a permanent annotation/fact/rule, write a \
 durable wiki page; do not use a handoff for that. Use these tools when \
 the conversation calls for them:\n\

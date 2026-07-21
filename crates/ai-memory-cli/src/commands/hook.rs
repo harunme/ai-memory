@@ -16,7 +16,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ai_memory_core::{AgentKind, SessionId};
+use ai_memory_core::{AgentKind, ManagedRunId, SessionId};
 use ai_memory_hooks::capture_policy::metadata_only_body;
 use ai_memory_hooks::{CaptureDisposition, PolicyState};
 use ai_memory_llm::OidcToken;
@@ -48,6 +48,7 @@ const START_BUDGET_ENV: &str = "AI_MEMORY_HOOK_START_BUDGET_MINUTES";
 const BACKGROUND_DRAIN_BUDGET_ENV: &str = "AI_MEMORY_HOOK_BACKGROUND_DRAIN_BUDGET_MINUTES";
 
 const INCREMENTAL_THRESHOLD_ENV: &str = "AI_MEMORY_HOOK_INCREMENTAL_THRESHOLD";
+const MANAGED_RUN_ENV: &str = "AI_MEMORY_RUN_ID";
 /// Backlog size at which `post-tool-use` does a mid-session catch-up drain, so a
 /// light session pays only a `read_dir`. Override via the env var above.
 const DEFAULT_INCREMENTAL_THRESHOLD: usize = 32;
@@ -253,6 +254,18 @@ fn env_lookup(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+fn managed_run_query_suffix_with(mut env_lookup: impl FnMut(&str) -> Option<String>) -> String {
+    env_lookup(MANAGED_RUN_ENV)
+        .filter(|value| value.parse::<ManagedRunId>().is_ok())
+        .map_or_else(String::new, |value| {
+            format!("&managed_run={}", url_encode(&value))
+        })
+}
+
+fn managed_run_query_suffix() -> String {
+    managed_run_query_suffix_with(env_lookup)
+}
+
 /// Read a positive-integer minute override from `name`, falling back to the
 /// built-in short default for missing / empty / non-numeric / zero values. Clamp
 /// large values so a typo cannot block a hook boundary for hours or days.
@@ -386,7 +399,8 @@ where
     let dd = resolve_data_dir(data_dir.as_deref());
     let spool = hook_spool::spool_dir(&dd);
     let session_qs = session_id_query_suffix(&dd, &args.agent, &args.event, &json);
-    let hook_qs = format!("{qs}{session_qs}");
+    let managed_qs = managed_run_query_suffix();
+    let hook_qs = format!("{qs}{session_qs}{managed_qs}");
 
     // Spool THIS event — an instant local write, never the network. The auth
     // mode is decided without a round-trip: an explicit `--auth-token` is
@@ -454,7 +468,15 @@ where
         if AgentKind::from_wire(&args.agent).session_start_injects_handoff() {
             let client = build_client();
             let bearer = hook_spool::resolve_bearer(&client, &dd, args.auth_token.as_deref()).await;
-            let handoff_url = format!("{base}/handoff?agent={}{qs}", args.agent);
+            let native_session_qs = canonical_session_id
+                .as_deref()
+                .map_or_else(String::new, |session_id| {
+                    format!("&session_id={}", url_encode(session_id))
+                });
+            let handoff_url = format!(
+                "{base}/handoff?agent={}{qs}{managed_qs}{native_session_qs}",
+                args.agent
+            );
             if let Some(handoff) =
                 get_handoff(&client, &handoff_url, bearer.as_deref(), handoff_timeout()).await
             {

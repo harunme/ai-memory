@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-07-20
+
+### Fixed
+- Managed launch failures now cancel their server lease immediately, and a new
+  launch waits briefly when the previous launcher is still finalizing. The
+  parent launcher also survives terminal interrupts long enough to finish or
+  cancel the run, preventing a normal quit-and-reopen from being blocked by the
+  90-second crash-recovery lease.
+- CLI startup diagnostics now show the configured server URL and use the real
+  host name in lease-owner messages, avoiding misleading `localhost` labels for
+  remote-server clients.
+
+## [1.17.0] - 2026-07-20
+
+### Added
+- `ai-memory run` without a harness now selects among checkout-local Claude
+  Code, Codex, OpenCode, Pi, and Crush sessions. Empty workstreams adopt the
+  newest session automatically; established workstreams prefer their most
+  recently linked available harness. A directory with no matching session
+  exits with explicit start commands instead of creating an empty workstream.
+- Managed workstreams now support Crush through its project-local read-only
+  SQLite transcript and supported `options.global_context_paths` configuration.
+  ai-memory never writes the original Crush config or session database; the
+  launched Crush process retains normal ownership of its native session writes.
+- Wrapper-owned `run --yolo` translates to each harness's native dangerous-mode
+  option for Claude Code, Codex, OpenCode, Pi, and Crush.
+- A managed-harness contribution protocol documents the native-session,
+  read-only import, context-delivery, migration, privacy, and acceptance-test
+  requirements for adding agents beyond the currently supported set.
+
+### Changed
+- The first interactive `ai-memory run` on an otherwise-empty workstream now
+  offers recent native sessions recorded for the same checkout, with the newest
+  as the default or an explicit fresh-session choice. Adoption is disabled for
+  `--new`, explicit selectors, scripted/noninteractive launches, and any
+  workstream already established by another harness, preventing obsolete local
+  sessions from contaminating later cross-harness switches.
+
+### Fixed
+- Managed utility invocations such as `ai-memory run codex --version` no longer
+  discover and import a different process's recently updated native session.
+  Passthrough commands also do not fetch or acknowledge managed startup context.
+- Managed runs now verify the host harness executable before opening a server
+  lease and report how to refresh a stale Docker wrapper. The wrapper path is
+  regression-tested to preserve a remote `AI_MEMORY_SERVER_URL`, auth, and the
+  host `PATH` without entering Docker, and now retains the `run` subcommand when
+  it hands control to the native ai-memory client.
+- Corrected stale project-move flags in the marker guide and documented the
+  distinction between a server-side project rename and a physical checkout or
+  native-session relocation.
+
+## [1.16.0] - 2026-07-20
+
+### Added
+- Optional managed cross-harness workstreams via `ai-memory run` for Claude
+  Code, Codex, OpenCode, Pi, and OMP. Direct harness launches retain the legacy
+  hook/handoff behavior. Managed launches transparently create or resume one
+  native session per harness, pass all harness argv through without a `--`
+  separator, inject unseen portable context at SessionStart, import visible
+  native transcript tails through read-only adapters, and record non-mutating
+  repository checkpoints. A lease prevents concurrent writers; deterministic
+  event ids, incremental cursors, immutable sanitized JSONL segments, and
+  batched idempotent imports make retry and crash recovery explicit. Hidden
+  reasoning and private provider records are excluded with loss annotations.
+  `ai-memory workstream-search` searches history older than the bounded startup
+  packet. The Linux/macOS Docker wrapper uses a checksum-verified cached native
+  client for `run` so host agent executables and transcript stores remain
+  accessible. A separate opt-in local acceptance runner validates real
+  cross-harness delivery and native resume without adding credentialed model
+  calls to CI. Generated OpenCode/Pi/OMP integrations reserve managed context
+  acknowledgement for their model-visible injection path; OpenCode caches the
+  packet per native session so auxiliary model requests cannot consume it
+  before the main coding turn. Pi/OMP native `--session-dir` overrides are
+  honored by the importer, as are native store environment overrides for all
+  five adapters. This includes complete atomic-write temp transcripts left by
+  a Pi-family process that exits before its final rename.
+
 ### Changed
 - Configuring the hosted `anthropic` or `openai` provider without an explicit
   model now selects the documented recommended defaults, `claude-haiku-4-5`
@@ -2038,7 +2115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.15.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.17.1...HEAD
+[1.17.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.1
+[1.17.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.0
+[1.16.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.16.0
 [1.15.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.15.0
 [1.14.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.14.0
 [1.13.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.13.0

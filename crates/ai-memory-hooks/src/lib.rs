@@ -27,6 +27,7 @@ pub mod log;
 pub mod payload;
 pub mod router;
 pub mod synth;
+pub mod workstream;
 
 // Re-export the sanitizer types from core so callers that grew up
 // pointing at this crate's `sanitize` module keep working.
@@ -46,3 +47,4 @@ pub use router::{
     hook_router,
 };
 pub use synth::synthesize_session_page;
+pub use workstream::{WorkstreamState, workstream_router};

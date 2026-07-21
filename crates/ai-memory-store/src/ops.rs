@@ -2559,21 +2559,7 @@ mod tests {
     #[test]
     fn begin_session_accepts_all_supported_agent_kinds() {
         let (_tmp, mut conn, ws, proj) = fresh_db();
-        for agent_kind in [
-            AgentKind::ClaudeCode,
-            AgentKind::Codex,
-            AgentKind::OpenCode,
-            AgentKind::Cursor,
-            AgentKind::GeminiCli,
-            AgentKind::ClaudeDesktop,
-            AgentKind::OpenClaw,
-            AgentKind::AntigravityCli,
-            AgentKind::Omp,
-            AgentKind::Pi,
-            AgentKind::Grok,
-            AgentKind::Devin,
-            AgentKind::Other,
-        ] {
+        for agent_kind in AgentKind::ALL {
             let sid = SessionId::new();
             begin_session(
                 &mut conn,

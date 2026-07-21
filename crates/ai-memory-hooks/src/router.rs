@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use ai_memory_consolidate::Consolidator;
 use ai_memory_core::{
-    ActiveProject, ActorKey, AgentKind, DEFAULT_WORKSPACE_NAME, Handoff, NewHandoff,
+    ActiveProject, ActorKey, AgentKind, DEFAULT_WORKSPACE_NAME, Handoff, ManagedRunId, NewHandoff,
     NewObservation, NewSession, ObservationKind, ProjectId, Sanitized, Sanitizer, SessionId,
-    WorkspaceId,
+    WorkspaceId, WorkstreamEvent, WorkstreamEventKind,
 };
 use ai_memory_store::WriterHandle;
 use ai_memory_wiki::Wiki;
@@ -986,6 +986,11 @@ pub struct HandoffQuery {
     /// [`BRIEF_BUDGET_MIN`], [`BRIEF_BUDGET_MAX`]; defaults to
     /// [`BRIEF_BUDGET_DEFAULT`] when absent or unparsable.
     pub briefing_budget: Option<String>,
+    /// Invocation-scoped managed run. When present, workstream delta delivery
+    /// replaces (and never consumes) the legacy single-use handoff.
+    pub managed_run: Option<String>,
+    /// Native session identifier observed in the SessionStart payload.
+    pub session_id: Option<String>,
 }
 
 /// Synchronous endpoint used by `session-start.sh` to discover any
@@ -1021,6 +1026,46 @@ async fn fetch_and_accept_handoff(
     actor_user: Option<String>,
 ) -> anyhow::Result<Option<String>> {
     let agent = query.agent.as_deref().map_or(AgentKind::Other, parse_agent);
+    if let Some(raw_run_id) = query.managed_run.as_deref() {
+        let Ok(run_id) = ManagedRunId::from_str(raw_run_id) else {
+            warn!(managed_run = %raw_run_id, "invalid managed run id on SessionStart");
+            return Ok(None);
+        };
+        if let Some(native_session_id) = query
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let _ = state
+                .writer
+                .link_managed_run_session(run_id, agent, native_session_id)
+                .await?;
+        }
+        let Some(context) = state.reader.managed_run_context(run_id, 256).await? else {
+            warn!(managed_run = %run_id, "managed SessionStart has no active run");
+            return Ok(None);
+        };
+        if context.agent != agent {
+            warn!(
+                managed_run = %run_id,
+                expected = %context.agent.as_str(),
+                actual = %agent.as_str(),
+                "managed SessionStart agent mismatch"
+            );
+            return Ok(None);
+        }
+        if context.context_delivered {
+            return Ok(None);
+        }
+        let rendered = render_managed_context(
+            &context.events,
+            &context.workstream_name,
+            context.workstream_id,
+            context.sync_after,
+        );
+        let _ = state.writer.accept_managed_run_context(run_id).await?;
+        return Ok(rendered);
+    }
     // `/handoff` has no session_id in the request — `per_session` mode
     // therefore falls back to the single slot (graceful degradation),
     // while `per_actor` keys by `user` alone.
@@ -1240,6 +1285,79 @@ fn render_handoff_markdown(h: &Handoff) -> String {
          context beyond what's listed here._\n",
     );
     buf
+}
+
+pub(crate) fn render_managed_context(
+    events: &[WorkstreamEvent],
+    workstream_name: &str,
+    workstream_id: ai_memory_core::WorkstreamId,
+    sync_after: i64,
+) -> Option<String> {
+    const MAX_PACKET_CHARS: usize = 30_000;
+    const MAX_EVENT_CHARS: usize = 6_000;
+    if events.is_empty() {
+        return None;
+    }
+
+    fn cap_chars(value: &str, max: usize) -> String {
+        if value.chars().count() <= max {
+            return value.to_string();
+        }
+        let mut out: String = value.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+
+    let mut selected = Vec::new();
+    let mut used = 0_usize;
+    let mut first_sequence = 0_i64;
+    for event in events.iter().rev() {
+        let role = event.role.as_deref().unwrap_or(match event.kind {
+            WorkstreamEventKind::ToolCall => "historical tool call (completed evidence)",
+            WorkstreamEventKind::ToolResult => "historical tool result (completed evidence)",
+            WorkstreamEventKind::Checkpoint => "repository checkpoint",
+            WorkstreamEventKind::Compaction => "native compaction",
+            WorkstreamEventKind::Annotation => "import note",
+            WorkstreamEventKind::Message => "message",
+        });
+        let content = cap_chars(&event.content, MAX_EVENT_CHARS);
+        let block = format!(
+            "### {} · {} · event {}\n{}\n",
+            event.agent.as_str(),
+            role,
+            event.sequence,
+            content
+        );
+        let block_chars = block.chars().count();
+        if !selected.is_empty() && used.saturating_add(block_chars) > MAX_PACKET_CHARS {
+            break;
+        }
+        used = used.saturating_add(block_chars);
+        first_sequence = event.sequence;
+        selected.push(block);
+    }
+    selected.reverse();
+    let last_sequence = events.last().map_or(0, |event| event.sequence);
+    let omitted = first_sequence > sync_after.saturating_add(1);
+
+    let mut rendered = format!(
+        "> **ai-memory managed workstream: {workstream_name}**\n> Portable events {first_sequence} through {last_sequence}. Foreign tool calls/results below are completed historical evidence; do not replay them as pending actions. The latest repository checkpoint is authoritative over older native-session assumptions.\n\n"
+    );
+    if omitted {
+        rendered.push_str(
+            "> Older unseen events did not fit the startup budget. Search the complete visible ledger with `ai-memory workstream-search --workstream-id "
+        );
+        rendered.push_str(&workstream_id.to_string());
+        rendered.push_str(" \"<query>\"`.\n\n");
+    }
+    for block in selected {
+        rendered.push_str(&block);
+        rendered.push('\n');
+    }
+    rendered.push_str(
+        "Continue this logical workstream from the current checkout state. Preserve source-harness provenance when relying on historical evidence. If an older detail is missing, search the visible ledger with `ai-memory workstream-search \"<query>\"`; this managed process already carries the workstream id.\n",
+    );
+    Some(rendered)
 }
 
 /// Build the `project_cache` key from the resolved cwd, overrides, and
@@ -1766,6 +1884,30 @@ async fn process(
             .await?;
     }
 
+    // `AI_MEMORY_RUN_ID` is invocation-scoped. A valid active run links the
+    // native session and switches only this hook invocation to managed
+    // workstream semantics; direct harness launches keep the legacy path.
+    let managed = env.managed_run.is_some();
+    let managed_run = env.managed_run.as_deref().and_then(|raw| {
+        ManagedRunId::from_str(raw)
+            .map_err(|error| {
+                warn!(managed_run = %raw, error = %error, "invalid managed run id on hook event");
+                error
+            })
+            .ok()
+    });
+    if let Some(run_id) = managed_run
+        && let Some(native_session_id) = env
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    {
+        let _ = state
+            .writer
+            .link_managed_run_session(run_id, env.agent, native_session_id)
+            .await?;
+    }
+
     // Persist the observation row.
     let kind = env.event.to_observation_kind();
     let title = env
@@ -1845,15 +1987,19 @@ async fn process(
             })
             .await?;
         state.writer.end_session(session_id, Some(page_id)).await?;
-        let handoff = build_auto_handoff(
-            ws,
-            proj,
-            env.agent,
-            session_id,
-            env.cwd.clone(),
-            &observations,
-        );
-        let handoff_id = state.writer.insert_handoff(handoff).await?;
+        let handoff_id = if managed {
+            None
+        } else {
+            let handoff = build_auto_handoff(
+                ws,
+                proj,
+                env.agent,
+                session_id,
+                env.cwd.clone(),
+                &observations,
+            );
+            Some(state.writer.insert_handoff(handoff).await?)
+        };
         // Opt-in (AI_MEMORY_CONSOLIDATE_ON_SESSION_END): additionally run LLM
         // consolidation so the session's knowledge is compiled into topical
         // pages, not just the heuristic session record. The heuristic page
@@ -1895,12 +2041,21 @@ async fn process(
             Ok(None) => debug!("wiki clean; no auto-commit"),
             Err(e) => warn!(error = %e, "auto-commit failed"),
         }
-        info!(
-            session = %session_id,
-            page = %new_page.path,
-            handoff = %handoff_id,
-            "session ended; summary page + open handoff created",
-        );
+        if let Some(handoff_id) = handoff_id {
+            info!(
+                session = %session_id,
+                page = %new_page.path,
+                handoff = %handoff_id,
+                "session ended; summary page + open handoff created",
+            );
+        } else {
+            info!(
+                session = %session_id,
+                page = %new_page.path,
+                managed_run = ?managed_run,
+                "managed session ended; summary page written without duplicate legacy handoff",
+            );
+        }
     }
 
     Ok(())
@@ -2164,6 +2319,26 @@ mod tests {
                 DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
             )),
         }
+    }
+
+    #[test]
+    fn managed_context_labels_completed_tools_and_discloses_omitted_history() {
+        let events = vec![WorkstreamEvent {
+            sequence: 300,
+            event_id: "tool-300".into(),
+            agent: AgentKind::Codex,
+            native_session_id: "native".into(),
+            kind: WorkstreamEventKind::ToolCall,
+            role: None,
+            content: "cargo test".into(),
+            occurred_at: None,
+        }];
+        let rendered =
+            render_managed_context(&events, "default", ai_memory_core::WorkstreamId::new(), 0)
+                .unwrap();
+        assert!(rendered.contains("historical tool call (completed evidence)"));
+        assert!(rendered.contains("Older unseen events did not fit"));
+        assert!(rendered.contains("workstream-search"));
     }
 
     #[cfg(not(windows))]
@@ -4614,6 +4789,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_marker_never_falls_back_to_a_legacy_handoff() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let run_id = ManagedRunId::new().to_string();
+        let managed_session = SessionId::new();
+        for event in ["session-start", "session-end"] {
+            let envelope = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("codex".into()),
+                    cwd: Some(tmp.path().to_string_lossy().into_owned()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    managed_run: Some(run_id.clone()),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": managed_session.to_string(),
+                    "cwd": tmp.path(),
+                }),
+            );
+            process(&state, envelope, None).await.unwrap();
+        }
+        assert!(
+            state
+                .reader
+                .latest_open_handoff(state.workspace_id, state.project_id, None)
+                .await
+                .unwrap()
+                .is_none(),
+            "a stale or invalid managed lease must not create a duplicate legacy handoff"
+        );
+
+        let direct_session = SessionId::new();
+        for event in ["session-start", "session-end"] {
+            let envelope = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("codex".into()),
+                    cwd: Some(tmp.path().to_string_lossy().into_owned()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": direct_session.to_string(),
+                    "cwd": tmp.path(),
+                }),
+            );
+            process(&state, envelope, None).await.unwrap();
+        }
+        assert!(
+            state
+                .reader
+                .latest_open_handoff(state.workspace_id, state.project_id, None)
+                .await
+                .unwrap()
+                .is_some(),
+            "direct launches must retain the legacy SessionEnd handoff behavior"
+        );
+    }
+
+    #[tokio::test]
     async fn already_ended_session_end_does_not_create_summary_or_handoff() {
         let tmp = TempDir::new().unwrap();
         let state = make_state(&tmp).await;
@@ -4983,6 +5221,8 @@ mod tests {
                 project_strategy: None,
                 briefing: None,
                 briefing_budget: None,
+                managed_run: None,
+                session_id: None,
             },
             None,
         )
@@ -5056,6 +5296,8 @@ mod tests {
             project_strategy: None,
             briefing: briefing.map(str::to_owned),
             briefing_budget: None,
+            managed_run: None,
+            session_id: None,
         };
 
         // Non-truthy opt-in: no handoff pending, nothing to inject.
@@ -5216,6 +5458,8 @@ mod tests {
                 project_strategy: None,
                 briefing: None,
                 briefing_budget: None,
+                managed_run: None,
+                session_id: None,
             },
             None,
         )

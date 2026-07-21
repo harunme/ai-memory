@@ -55,6 +55,9 @@ pub struct HookQuery {
     /// instead of just the current one — the meta-repo case (e.g. `ai-memory`
     /// needing to see `ai-memory-ops` / `infra` without passing `global=true`).
     pub default_global: Option<String>,
+    /// Invocation-scoped `ai-memory run` lease. Absent for every direct
+    /// harness launch, preserving legacy capture and handoff behavior.
+    pub managed_run: Option<String>,
 }
 
 /// Coalesced view of an incoming hook event after light parsing of the
@@ -90,6 +93,8 @@ pub struct HookEnvelope {
     /// router publishes it on the actor's `ActiveProject` so default-scoped
     /// read tools broaden to a global search.
     pub recall_default_global_requested: bool,
+    /// Invocation-scoped managed-run id forwarded by the host hook.
+    pub managed_run: Option<String>,
     /// Optional third-party extension namespace.
     pub extension: Option<String>,
     /// Optional source event name from the extension vocabulary.
@@ -348,6 +353,7 @@ impl HookEnvelope {
         let project_strategy = ProjectStrategy::parse(query.project_strategy.as_deref());
         let drop_subagent_requested = query_flag_truthy(query.drop_subagent.as_deref());
         let recall_default_global_requested = query_flag_truthy(query.default_global.as_deref());
+        let managed_run = query.managed_run.filter(|value| !value.trim().is_empty());
         let extension = normalize_extension_name(query.extension.as_deref());
         let source_event = extension.as_ref().and_then(|_| {
             let raw_source = query
@@ -404,6 +410,7 @@ impl HookEnvelope {
             project_strategy,
             drop_subagent_requested,
             recall_default_global_requested,
+            managed_run,
             extension,
             source_event,
             title_hint,

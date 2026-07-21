@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use ai_memory_core::{
     AgentKind, AutoImproveProposalId, AutoImproveRunId, Handoff, HandoffId, HandoffState,
-    Observation, ObservationId, ObservationKind, PageId, PagePath, ProjectId, SessionId, User,
-    UserId, WorkspaceId,
+    ManagedRunId, Observation, ObservationId, ObservationKind, PageId, PagePath, ProjectId,
+    SessionId, User, UserId, WorkspaceId, WorkstreamEvent, WorkstreamId,
 };
 use jiff::Timestamp;
 use parking_lot::Mutex;
@@ -34,6 +34,7 @@ use crate::error::{StoreError, StoreResult};
 use crate::fts_query::prepare_fts5_query;
 use crate::maintenance::MaintenanceJob;
 use crate::users::TOKEN_HASH_LEN;
+use crate::workstream::{ManagedRunContext, StoredManagedRunStatus};
 
 fn page_kind_expr(path_column: &str, frontmatter_column: &str) -> String {
     format!(
@@ -683,6 +684,39 @@ impl ReaderPool {
         })
         .await
         .map_err(|e| StoreError::PoolPanic(e.to_string()))?
+    }
+
+    /// Return the current state of one `ai-memory run` invocation.
+    pub async fn managed_run_status(
+        &self,
+        run_id: ManagedRunId,
+    ) -> StoreResult<Option<StoredManagedRunStatus>> {
+        self.with_conn(move |conn| crate::workstream::run_status(conn, run_id))
+            .await
+    }
+
+    /// Return the unseen portable range assigned to a managed SessionStart.
+    pub async fn managed_run_context(
+        &self,
+        run_id: ManagedRunId,
+        max_events: usize,
+    ) -> StoreResult<Option<ManagedRunContext>> {
+        self.with_conn(move |conn| crate::workstream::run_context(conn, run_id, max_events))
+            .await
+    }
+
+    /// Search visible events in one managed workstream, or return its newest
+    /// events when `query` is empty.
+    pub async fn search_workstream_events(
+        &self,
+        workstream_id: WorkstreamId,
+        query: String,
+        limit: usize,
+    ) -> StoreResult<Vec<WorkstreamEvent>> {
+        self.with_conn(move |conn| {
+            crate::workstream::search_events(conn, workstream_id, &query, limit)
+        })
+        .await
     }
 
     /// Run a full-text search against the FTS5 index and return the top
