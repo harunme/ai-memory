@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native commands and close the residual local-wire vector ([#196]).
 
 ### Fixed
+- The Linux Docker wrapper now detects an SELinux-enforcing host plus a
+  SELinux-enabled daemon and adds `--security-opt label=disable` only to
+  short-lived helper commands that write bind-mounted host files. This avoids
+  `Permission denied` during `install-*`, `setup-agent`, `uninstall`, and
+  `backup` without relabeling the user's home directory or changing the
+  long-lived server container ([#212]).
 - Windows `.ps1` fallback hook commands now use PowerShell `-EncodedCommand`
   instead of embedding `$env:` setup inside a nested quoted command. This
   prevents outer Windows hook runners such as Antigravity CLI from expanding

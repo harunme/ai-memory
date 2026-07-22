@@ -288,7 +288,13 @@ fn run_wrapper_with_fake_docker_and_claude_config(
     docker_info_stdout: &str,
     claude_config_dir: &str,
 ) -> String {
-    run_wrapper_with_fake_docker_env(args, docker_info_stdout, None, Some(claude_config_dir))
+    run_wrapper_with_fake_docker_env(
+        args,
+        docker_info_stdout,
+        None,
+        Some(claude_config_dir),
+        None,
+    )
 }
 
 // The wrapper also shells out to `id -u` / `id -g` when choosing its default
@@ -304,7 +310,22 @@ fn run_wrapper_with_fake_docker_and_uname(
     docker_info_stdout: &str,
     uname_stdout: Option<&str>,
 ) -> String {
-    run_wrapper_with_fake_docker_env(args, docker_info_stdout, uname_stdout, None)
+    run_wrapper_with_fake_docker_env(args, docker_info_stdout, uname_stdout, None, None)
+}
+
+#[cfg(unix)]
+fn run_wrapper_with_fake_selinux(
+    args: &[&str],
+    docker_info_stdout: &str,
+    selinux_mode: &str,
+) -> String {
+    run_wrapper_with_fake_docker_env(
+        args,
+        docker_info_stdout,
+        Some("Linux"),
+        None,
+        Some(selinux_mode),
+    )
 }
 
 #[cfg(unix)]
@@ -313,12 +334,14 @@ fn run_wrapper_with_fake_docker_env(
     docker_info_stdout: &str,
     uname_stdout: Option<&str>,
     claude_config_dir: Option<&str>,
+    selinux_mode: Option<&str>,
 ) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let docker_args = tmp.path().join("docker-args.txt");
     let docker = tmp.path().join("docker");
     let uname = tmp.path().join("uname");
     let id = tmp.path().join("id");
+    let getenforce = tmp.path().join("getenforce");
     std::fs::write(
         &docker,
         format!(
@@ -348,6 +371,14 @@ fn run_wrapper_with_fake_docker_env(
          esac\n",
     )
     .unwrap();
+    std::fs::write(
+        &getenforce,
+        format!(
+            "#!/usr/bin/env bash\nprintf '{}\\n'\n",
+            selinux_mode.unwrap_or("Disabled")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -356,6 +387,7 @@ fn run_wrapper_with_fake_docker_env(
             std::fs::set_permissions(&uname, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::set_permissions(&id, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&getenforce, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     // Always prepend the fake-binary dir to PATH: `id` is shadowed
@@ -486,6 +518,56 @@ fn rootful_docker_keeps_host_uid_for_host_config_commands() {
         "rootful Docker must not switch to root UID — that would write \
          ~/.local/share/ai-memory/hooks owned by root instead of the invoking \
          user; got {args}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn selinux_enforcing_disables_labels_only_for_host_file_commands() {
+    let selinux_info = "[name=seccomp,profile=default name=selinux name=cgroupns]";
+
+    for subcommand in [
+        "install-mcp",
+        "install-hooks",
+        "setup-agent",
+        "install-instructions",
+        "install-skills",
+        "uninstall",
+        "backup",
+    ] {
+        let args = run_wrapper_with_fake_selinux(&[subcommand], selinux_info, "Enforcing");
+        assert!(
+            args.contains("--security-opt\nlabel=disable"),
+            "{subcommand} writes bind-mounted host files and needs the scoped \
+             SELinux exception; got {args}"
+        );
+    }
+
+    let args = run_wrapper_with_fake_selinux(&["status"], selinux_info, "Enforcing");
+    assert!(
+        !args.contains("label=disable"),
+        "thin-client commands must retain SELinux label confinement; got {args}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn selinux_label_exception_requires_enforcement_and_daemon_support() {
+    let selinux_info = "[name=seccomp,profile=default name=selinux name=cgroupns]";
+    let args = run_wrapper_with_fake_selinux(&["install-mcp"], selinux_info, "Permissive");
+    assert!(
+        !args.contains("label=disable"),
+        "permissive hosts do not need a label exception; got {args}"
+    );
+
+    let args = run_wrapper_with_fake_selinux(
+        &["install-mcp"],
+        "[name=seccomp,profile=default name=cgroupns]",
+        "Enforcing",
+    );
+    assert!(
+        !args.contains("label=disable"),
+        "a daemon without SELinux support must not receive SELinux options; got {args}"
     );
 }
 

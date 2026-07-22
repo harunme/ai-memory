@@ -417,18 +417,33 @@ esac
 # write to a host bind mount: other commands only touch the /data named
 # volume, which isn't host-visible and doesn't have this problem, so leave
 # their UID mapping alone.
+DOCKER_SECURITY_OPTIONS=$("${DOCKER}" info --format '{{.SecurityOptions}}' 2>/dev/null || true)
 ROOTLESS_DOCKER=0
-if "${DOCKER}" info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
+if printf '%s\n' "${DOCKER_SECURITY_OPTIONS}" | grep -q 'name=rootless'; then
   ROOTLESS_DOCKER=1
 fi
 if [ "${WRITES_HOST_FILES}" -eq 1 ] && [ "${ROOTLESS_DOCKER}" -eq 1 ]; then
   USER_ARGS=(-u 0:0)
 fi
 
+SELINUX_ARGS=()
 case "$(uname -s 2>/dev/null || true)" in
   Linux)
     if [ -z "${AI_MEMORY_SERVER_URL:-}" ]; then
       NETWORK_ARGS=(--network host)
+    fi
+    # SELinux blocks the helper's container label from writing normal home
+    # labels even when its uid/gid match the host user. Relabeling the entire
+    # $HOME bind with :z/:Z is unsafe, so relax label confinement only for the
+    # short-lived, trusted helper commands that actually write host files.
+    SELINUX_MODE=$(getenforce 2>/dev/null || true)
+    if [ -z "${SELINUX_MODE}" ] && [ -r /sys/fs/selinux/enforce ]; then
+      SELINUX_MODE=$(cat /sys/fs/selinux/enforce 2>/dev/null || true)
+    fi
+    if [ "${WRITES_HOST_FILES}" -eq 1 ] \
+      && { [ "${SELINUX_MODE}" = "Enforcing" ] || [ "${SELINUX_MODE}" = "enforcing" ] || [ "${SELINUX_MODE}" = "1" ]; } \
+      && printf '%s\n' "${DOCKER_SECURITY_OPTIONS}" | grep -q 'name=selinux'; then
+      SELINUX_ARGS=(--security-opt label=disable)
     fi
     ;;
   Darwin)
@@ -494,6 +509,7 @@ fi
 # and falls back to the cwd basename only if it's unset.
 exec "${DOCKER}" run --rm ${TTY_ARGS[@]+"${TTY_ARGS[@]}"} \
   ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
+  ${SELINUX_ARGS[@]+"${SELINUX_ARGS[@]}"} \
   -v "${HOME}:${HOME}" \
   -v "${PWD}:/work" \
   -w /work \

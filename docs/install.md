@@ -1379,6 +1379,24 @@ that helper back to the host's `127.0.0.1:49374`, so `ai-memory status`,
 `ai-memory search`, and `ai-memory bootstrap` work with the same default
 URL as the generated agent config.
 
+#### SELinux-enforcing hosts
+
+On SELinux-enforcing Linux systems such as Fedora, RHEL, and openSUSE, normal
+home-directory labels can prevent the helper container from writing agent
+config even when its UID and GID match the host user. The wrapper checks both
+the host enforcement mode and Docker's advertised security options. For the
+short-lived helper commands that write host files (`install-*`, `setup-agent`,
+`uninstall`, and `backup`), it adds `--security-opt label=disable`; thin-client
+commands remain confined. This relaxes SELinux label confinement only for that
+trusted helper invocation. It does not modify the long-lived ai-memory server,
+which uses a Docker-managed named volume.
+
+Do not add `:z` or `:Z` to the wrapper's whole `$HOME` bind. Docker's
+[bind-mount documentation](https://docs.docker.com/engine/storage/bind-mounts/#configure-the-selinux-label)
+warns that relabeling system directories such as `/home` can make the host
+inoperable. Docker documents `label=disable` in the
+[`docker run` security options](https://docs.docker.com/reference/cli/docker/container/run/#security-opt).
+
 `ai-memory run` is the exception: the current wrapper intercepts it and starts a
 cached checksum-verified native client on the host, where harness executables
 and session stores exist. It preserves an explicit remote
