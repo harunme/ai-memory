@@ -21,6 +21,7 @@
 //! This crate does not read process environment directly; server configuration
 //! is resolved once by `ai-memory-cli` and threaded in as typed state.
 
+mod assistant_capture;
 pub mod capture_policy;
 pub mod log;
 pub mod payload;
@@ -31,6 +32,7 @@ pub mod workstream;
 // Re-export the sanitizer types from core so callers that grew up
 // pointing at this crate's `sanitize` module keep working.
 pub use ai_memory_core::{SanitizeConfig, Sanitized, Sanitizer};
+pub use assistant_capture::strip_assistant_message_raw;
 pub use capture_policy::{
     CaptureConfig, CaptureDecision, CaptureDisposition, CapturePolicy, CaptureProtocol,
     CaptureSource, ExtractionState, PolicyState, ToolFamily,

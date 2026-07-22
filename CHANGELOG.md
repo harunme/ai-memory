@@ -89,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model now selects the documented recommended defaults, `claude-haiku-4-5`
   and `gpt-5.4-mini`, instead of the older `claude-sonnet-4-6` and
   `gpt-4o-mini` fallbacks. Explicit `AI_MEMORY_LLM_MODEL` values are unchanged.
+- The native hook binary now drops any raw assistant-message field (Claude
+  Code's `last_assistant_message` on `Stop`) before it can reach the local
+  spool or the wire, and drains pre-existing spooled entries with the field
+  stripped too. The server applies the same strip defensively on `/hook` and
+  `/hook/batch` before building an envelope. This field was already never
+  persisted, so there is no behavior change; it closes a raw-text exposure in
+  the spool/wire. Optional assistant/Stop capture proposed in #196 remains
+  disabled. Upgrading the binary is sufficient for native Claude Code installs;
+  script-fallback installs (Docker wrapper, `AI_MEMORY_HOOK_PLATFORM=posix`)
+  should run `ai-memory install-hooks --agent claude-code --apply` to migrate to
+  native commands and close the residual local-wire vector ([#196]).
 
 ### Fixed
 - User-facing help and current-reference documentation now match the shipped

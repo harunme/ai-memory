@@ -437,8 +437,12 @@ async fn handle_hook(
     State(state): State<Arc<HookState>>,
     Query(query): Query<HookQuery>,
     actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
-    Json(body): Json<serde_json::Value>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Unconditional backstop (#196): drop any raw assistant-message field on the
+    // `Value` before it becomes a `HookEnvelope`, so the field can never reach
+    // `body_excerpt`, tracing, or the store — regardless of client version.
+    crate::assistant_capture::strip_assistant_message_raw(&mut body);
     let env = HookEnvelope::from_query_and_body(query, body);
     let Some(env) = inspect_capture_envelope(env) else {
         return (StatusCode::ACCEPTED, "capture policy dropped");
@@ -596,7 +600,10 @@ async fn handle_hook_batch(
         .map(|axum::Extension(ctx)| ctx.user)
         .unwrap_or_default();
     let mut accepted_indices = Vec::new();
-    for (idx, item) in items.into_iter().enumerate() {
+    for (idx, mut item) in items.into_iter().enumerate() {
+        // Same unconditional assistant-message backstop as `handle_hook`, applied
+        // per item before the envelope is built (#196).
+        crate::assistant_capture::strip_assistant_message_raw(&mut item.body);
         let query = parse_hook_query(&item.url);
         let env = HookEnvelope::from_query_and_body(query, item.body);
         let Some(env) = inspect_capture_envelope(env) else {
@@ -2874,6 +2881,93 @@ mod tests {
             .unwrap();
         let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(ack["accepted"], 2, "both events committed, oldest-first");
+    }
+
+    /// Recursively scan every file under `dir` for a byte pattern. Used to prove
+    /// a stripped field left no trace anywhere in the on-disk store (any column,
+    /// the WAL, etc.), not just in the read-back observation body.
+    fn any_file_contains(dir: &std::path::Path, needle: &[u8]) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if any_file_contains(&path, needle) {
+                    return true;
+                }
+            } else if let Ok(bytes) = std::fs::read(&path)
+                && bytes.windows(needle.len()).any(|window| window == needle)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_strips_assistant_message_before_persist() {
+        let tmp = TempDir::new().unwrap();
+        let state = Arc::new(make_state(&tmp).await);
+
+        // Mixed batch: a Stop carrying `last_assistant_message` (must be stripped
+        // and persisted empty) plus a clean UserPrompt (must be untouched). Proves
+        // the server backstop runs per item and does not disturb siblings (#196).
+        let stop_body = serde_json::json!({
+            "session_id": "stop-batch",
+            "last_assistant_message": "SENTINEL_ASSISTANT_MESSAGE"
+        });
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=stop&agent=claude-code".into(),
+                body: stop_body.clone(),
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=user-prompt-submit&agent=claude-code".into(),
+                body: serde_json::json!({ "session_id": "stop-batch", "prompt": "hello world" }),
+            },
+        ];
+
+        let response = handle_hook_batch(State(state.clone()), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sid = resolve_session_id(&HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "stop".into(),
+                agent: Some("claude-code".into()),
+                session_id: Some("stop-batch".into()),
+                ..Default::default()
+            },
+            stop_body,
+        ))
+        .unwrap();
+        let observations = state.reader.observations_for_session(sid).await.unwrap();
+
+        let stop = observations
+            .iter()
+            .find(|o| o.kind == ai_memory_core::ObservationKind::Stop)
+            .expect("Stop event is still persisted");
+        assert!(
+            !stop.body.contains("SENTINEL_ASSISTANT_MESSAGE"),
+            "Stop body carried the assistant message: {:?}",
+            stop.body
+        );
+        let prompt = observations
+            .iter()
+            .find(|o| o.kind == ai_memory_core::ObservationKind::UserPrompt)
+            .expect("clean sibling UserPrompt is persisted");
+        assert!(
+            prompt.body.contains("hello world"),
+            "sibling prompt was disturbed by the strip: {:?}",
+            prompt.body
+        );
+
+        assert!(
+            !any_file_contains(tmp.path(), b"SENTINEL_ASSISTANT_MESSAGE"),
+            "assistant message leaked into the on-disk store"
+        );
     }
 
     /// `pre-tool-use` query+agent for building an env to recompute a SessionId.
