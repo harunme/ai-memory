@@ -27,16 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install-mcp --client claude-code` and `uninstall` now honour
   `CLAUDE_CONFIG_DIR`: MCP registrations go to
   `$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set (non-empty),
-  falling back to `~/.claude.json` otherwise. The dry-run output prints the
-  resolved config path instead of a hardcoded `~/.claude.json`.
+  falling back to `~/.claude.json` otherwise. Uninstall checks both the active
+  relocated path and the home default so enabling the variable does not orphan
+  a prior default-path registration. The
+  dry-run output prints the resolved config path instead of a hardcoded path.
 - `install-hooks --agent claude-code` and `setup-agent` follow the same
   resolution for the hooks settings file: `$CLAUDE_CONFIG_DIR/settings.json`
-  when set, else `~/.claude/settings.json`. Rendered output and the
-  chmod-600 warning show the resolved path.
+  when set, else `~/.claude/settings.json`. Uninstall checks both locations;
+  rendered output and the chmod-600 warning show the resolved path.
 - `install-skills --scope global` (claude-code root) installs to
   `$CLAUDE_CONFIG_DIR/skills` when the variable is set, else
   `~/.claude/skills`. `uninstall` sweeps the relocated root alongside the
   home default so installs that predate the env var are still removed.
+- The Docker CLI wrapper forwards `CLAUDE_CONFIG_DIR` into its helper
+  container for relocated Claude Code configs beneath the existing home bind.
 
 ## [1.17.1] - 2026-07-20
 

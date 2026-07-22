@@ -1,7 +1,7 @@
 //! Path helpers shared by command renderers and hook capture.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the user home used for agent configuration paths.
 ///
@@ -24,6 +24,27 @@ pub(crate) fn claude_config_dir(env_override: Option<std::ffi::OsString>) -> Opt
         return None;
     }
     Some(PathBuf::from(value))
+}
+
+/// Candidate Claude Code paths for uninstall. The active relocated path comes
+/// first, followed by the legacy home path, with exact duplicates removed.
+pub(crate) fn claude_config_paths(
+    home: Option<&Path>,
+    relocated: Option<&Path>,
+    legacy_relative: &Path,
+    relocated_relative: &Path,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::with_capacity(2);
+    if let Some(root) = relocated {
+        paths.push(root.join(relocated_relative));
+    }
+    if let Some(root) = home {
+        let legacy = root.join(legacy_relative);
+        if !paths.contains(&legacy) {
+            paths.push(legacy);
+        }
+    }
+    paths
 }
 
 /// Strip only Windows verbatim path prefixes that are safe to render as plain
@@ -72,6 +93,31 @@ mod tests {
         for env in [None, Some(OsString::new()), Some(OsString::from("   "))] {
             assert_eq!(claude_config_dir(env.clone()), None, "env {env:?}");
         }
+    }
+
+    #[test]
+    fn claude_config_paths_put_relocated_first_and_deduplicate() {
+        assert_eq!(
+            claude_config_paths(
+                Some(Path::new("/home/alice")),
+                Some(Path::new("/stores/claude")),
+                Path::new(".claude/settings.json"),
+                Path::new("settings.json"),
+            ),
+            [
+                PathBuf::from("/stores/claude/settings.json"),
+                PathBuf::from("/home/alice/.claude/settings.json"),
+            ]
+        );
+        assert_eq!(
+            claude_config_paths(
+                Some(Path::new("/home/alice")),
+                Some(Path::new("/home/alice/.claude")),
+                Path::new(".claude/settings.json"),
+                Path::new("settings.json"),
+            ),
+            [PathBuf::from("/home/alice/.claude/settings.json")]
+        );
     }
 
     #[test]

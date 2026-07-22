@@ -23,6 +23,8 @@
 #   AI_MEMORY_NO_TTY=1      force non-interactive even on a real tty
 #   AI_MEMORY_NO_VERSION_CHECK=1  skip the once-per-day update check
 #   AI_MEMORY_NATIVE_BIN    native ai-memory binary used for `run` (optional)
+#   CLAUDE_CONFIG_DIR       Claude Code config root (forwarded to the helper;
+#                           paths under $HOME are covered by the home bind mount)
 set -euo pipefail
 
 IMAGE="${AI_MEMORY_IMAGE:-akitaonrails/ai-memory:latest}"
@@ -330,6 +332,7 @@ for var in \
   AI_MEMORY_WORKSTREAM_ID \
   AI_MEMORY_HOOK_PLATFORM \
   AI_MEMORY_HOOKS_HOST_ROOT \
+  CLAUDE_CONFIG_DIR \
   ANTHROPIC_API_KEY \
   OPENAI_API_KEY \
   COPILOT_GITHUB_TOKEN \
@@ -470,8 +473,8 @@ else
 fi
 
 # Mount $HOME at the same path inside the container so:
-#   - dirs::home_dir() resolves identically (~/.claude/settings.json
-#     auto-detect works without --config-file)
+#   - dirs::home_dir() resolves identically (Claude's default paths and any
+#     CLAUDE_CONFIG_DIR beneath $HOME work without extra path flags)
 #   - install-hooks stages scripts into ~/.local/share/ai-memory/hooks/
 #
 # Mount $PWD at /work and set the container workdir there. This

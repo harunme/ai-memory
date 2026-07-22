@@ -74,7 +74,11 @@ own config resolution: `install-mcp` writes the MCP registration to
 `install-hooks` / `setup-agent` target `$CLAUDE_CONFIG_DIR/settings.json`
 (instead of `~/.claude/settings.json`), and `install-skills --scope global`
 uses `$CLAUDE_CONFIG_DIR/skills` (instead of `~/.claude/skills`). `uninstall`
-sweeps the relocated paths alongside the defaults.
+sweeps the active relocated paths alongside the home defaults. It cannot
+discover an older arbitrary `CLAUDE_CONFIG_DIR` that is no longer set. The
+Docker wrapper forwards the variable for config roots under its existing
+`$HOME` bind mount; use the native binary when the relocated root is outside
+`$HOME`.
 
 The CLI commands (`bootstrap`, `status`, `search`, `lint`, `auto-improve`,
 `curator`, `pending-writes`, etc.) inherit the two env vars automatically. So do

@@ -72,6 +72,7 @@ fn run_wrapper_on_fake_macos(args: &[&str]) -> String {
         .env("AI_MEMORY_DATA_VOLUME", "test-ai-memory-data")
         .env("HOME", shell_path(tmp.path()))
         .env_remove("AI_MEMORY_SERVER_URL")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert!(
@@ -281,6 +282,15 @@ fn run_wrapper_with_fake_docker(args: &[&str], docker_info_stdout: &str) -> Stri
     run_wrapper_with_fake_docker_and_uname(args, docker_info_stdout, None)
 }
 
+#[cfg(unix)]
+fn run_wrapper_with_fake_docker_and_claude_config(
+    args: &[&str],
+    docker_info_stdout: &str,
+    claude_config_dir: &str,
+) -> String {
+    run_wrapper_with_fake_docker_env(args, docker_info_stdout, None, Some(claude_config_dir))
+}
+
 // The wrapper also shells out to `id -u` / `id -g` when choosing its default
 // Docker uid mapping. Arch container tests often run as root, which would make
 // the default mapping `-u 0:0` and produce a false positive in the assertions
@@ -293,6 +303,16 @@ fn run_wrapper_with_fake_docker_and_uname(
     args: &[&str],
     docker_info_stdout: &str,
     uname_stdout: Option<&str>,
+) -> String {
+    run_wrapper_with_fake_docker_env(args, docker_info_stdout, uname_stdout, None)
+}
+
+#[cfg(unix)]
+fn run_wrapper_with_fake_docker_env(
+    args: &[&str],
+    docker_info_stdout: &str,
+    uname_stdout: Option<&str>,
+    claude_config_dir: Option<&str>,
 ) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let docker_args = tmp.path().join("docker-args.txt");
@@ -354,7 +374,11 @@ fn run_wrapper_with_fake_docker_and_uname(
         .env("AI_MEMORY_NO_VERSION_CHECK", "1")
         .env("AI_MEMORY_DATA_VOLUME", "test-ai-memory-data")
         .env("HOME", shell_path(tmp.path()))
-        .env_remove("AI_MEMORY_SERVER_URL");
+        .env_remove("AI_MEMORY_SERVER_URL")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    if let Some(claude_config_dir) = claude_config_dir {
+        command.env("CLAUDE_CONFIG_DIR", claude_config_dir);
+    }
     let output = command.output().unwrap();
     assert!(
         output.status.success(),
@@ -363,6 +387,20 @@ fn run_wrapper_with_fake_docker_and_uname(
         String::from_utf8_lossy(&output.stderr)
     );
     std::fs::read_to_string(docker_args).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn wrapper_forwards_claude_config_dir_to_helper_container() {
+    let args = run_wrapper_with_fake_docker_and_claude_config(
+        &["install-hooks", "--agent", "claude-code", "--apply"],
+        "[name=seccomp,profile=default]",
+        "/home/alice/.config/claude",
+    );
+    assert!(
+        args.contains("-e\nCLAUDE_CONFIG_DIR"),
+        "wrapper must forward Claude's config root; got {args}"
+    );
 }
 
 #[cfg(unix)]

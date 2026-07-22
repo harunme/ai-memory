@@ -11,7 +11,7 @@ use crate::cli::UninstallArgs;
 use crate::commands::apply_shared::apply_atomic;
 use crate::commands::apply_shared::mutate_json;
 use crate::commands::apply_shared::mutate_toml;
-use crate::commands::path_util::home_dir;
+use crate::commands::path_util::{claude_config_dir, claude_config_paths, home_dir};
 use crate::commands::{data_purge, install_hooks, install_mcp, openclaw_plugin};
 use crate::config::Config;
 use ai_memory_core::routing_skills::{
@@ -136,14 +136,21 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
     let want = |k: crate::cli::UninstallOnly| args.only.is_none() || args.only == Some(k);
     let name = args.mcp_name.as_deref();
     let url = args.mcp_url.as_str();
+    let home = home_dir();
+    let claude_config_dir = claude_config_dir(std::env::var_os("CLAUDE_CONFIG_DIR"));
 
     // ---- Hooks (JSON configs) ----
     if want(crate::cli::UninstallOnly::Hooks) {
-        let hook_files = [
-            (
-                install_hooks::claude_settings_path()?,
-                HookConfigShape::NestedHooksKey,
-            ),
+        let mut hook_files: Vec<_> = claude_config_paths(
+            home.as_deref(),
+            claude_config_dir.as_deref(),
+            Path::new(".claude/settings.json"),
+            Path::new("settings.json"),
+        )
+        .into_iter()
+        .map(|path| (path, HookConfigShape::NestedHooksKey))
+        .collect();
+        hook_files.extend([
             (
                 install_hooks::codex_hooks_path()?,
                 HookConfigShape::NestedHooksKey,
@@ -173,7 +180,7 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
                 install_hooks::devin_config_path()?,
                 HookConfigShape::NestedHooksKey,
             ),
-        ];
+        ]);
         for (path, shape) in hook_files {
             if !path.exists() {
                 continue;
@@ -277,25 +284,37 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
             Devin,
             KimiCode,
         ] {
-            let Ok(path) = install_mcp::mcp_config_path(client) else {
-                continue;
+            let paths = if matches!(client, ClaudeCode) {
+                claude_config_paths(
+                    home.as_deref(),
+                    claude_config_dir.as_deref(),
+                    Path::new(".claude.json"),
+                    Path::new(".claude.json"),
+                )
+            } else {
+                let Ok(path) = install_mcp::mcp_config_path(client) else {
+                    continue;
+                };
+                vec![path]
             };
-            if !path.exists() {
-                continue;
+            for path in paths {
+                if !path.exists() {
+                    continue;
+                }
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let (_new, removed) = if matches!(client, Codex | Grok) {
+                    strip_mcp_toml(&content, name, url)?
+                } else {
+                    strip_mcp_json_client(&content, client, name, url)?
+                };
+                let op = if matches!(client, Codex | Grok) {
+                    RewriteOp::McpToml
+                } else {
+                    RewriteOp::McpJson(client)
+                };
+                push_rewrite(&mut plan, path, removed, op);
             }
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let (_new, removed) = if matches!(client, Codex | Grok) {
-                strip_mcp_toml(&content, name, url)?
-            } else {
-                strip_mcp_json_client(&content, client, name, url)?
-            };
-            let op = if matches!(client, Codex | Grok) {
-                RewriteOp::McpToml
-            } else {
-                RewriteOp::McpJson(client)
-            };
-            push_rewrite(&mut plan, path, removed, op);
         }
     }
 
@@ -324,11 +343,8 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
     // ---- Managed Agent Skills (project + global roots) ----
     if want(crate::cli::UninstallOnly::Skills) {
         let cwd = std::env::current_dir().context("getting CWD for skill removal")?;
-        let home = home_dir();
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
         let grok_home = install_mcp::grok_home().ok();
-        let claude_config_dir =
-            crate::commands::path_util::claude_config_dir(std::env::var_os("CLAUDE_CONFIG_DIR"));
         for root in skill_roots(
             &cwd,
             home.as_deref(),
