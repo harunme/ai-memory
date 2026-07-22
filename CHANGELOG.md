@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.3] - 2026-07-22
+
 ### Fixed
 - Corrected Docker-wrapper upgrade guidance: `ai-memory upgrade` no longer
   claims a configured remote server is stale when it cannot inspect that
@@ -2177,7 +2179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.17.2...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.17.3...HEAD
+[1.17.3]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.3
 [1.17.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.2
 [1.17.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.1
 [1.17.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.17.0
