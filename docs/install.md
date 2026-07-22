@@ -886,8 +886,9 @@ The short version: run the install commands from the same environment that
 launches the agent. WSL2-launched agents need WSL paths and POSIX `.sh` hooks.
 Native Windows agents can use the tagged `ai-memory-windows-x86_64.zip`, the
 Docker Desktop wrapper, or a source build. Native Claude Code uses Claude exec
-form with a real `ai-memory.exe` by default; other native Windows script-hook
-agents use PowerShell `.ps1` defaults.
+form with a real `ai-memory.exe` by default; the Windows Docker wrapper renders
+other native Windows script-hook agents through encoded PowerShell `.ps1`
+fallback commands.
 
 When run from source, `install-hooks` finds the bundled scripts in
 the repo's `hooks/` automatically. Extracted release archives also
