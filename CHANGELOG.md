@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ai-memory completions <shell>` prints a shell-completion script for bash,
+  zsh, fish, PowerShell, or elvish. The script is generated from the binary's
+  own command tree, so it always matches the installed version; install paths
+  per shell are documented in `docs/shell-completions.md`. The command reads no
+  config and needs no data directory, so it works before `ai-memory init`.
+
 ### Changed
 - Documented Atlas Cloud through the existing `openai-compat` provider instead
   of adding a redundant provider type, including the endpoint, model, and API
