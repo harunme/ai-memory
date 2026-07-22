@@ -328,16 +328,29 @@ where
             return Ok(());
         }
     };
-    // Defensively drop any raw assistant-message field (e.g. Claude Code's
-    // `last_assistant_message` on Stop) BEFORE it can reach the local spool or
-    // the wire (#196). Optional capture remains disabled, so stripping it
-    // pre-spool closes a raw-text exposure with no persisted-data behavior
-    // change. Reserialize only when we actually removed something, so unrelated
-    // events keep byte-exact spool
-    // bodies (see `native_hook_accepts_plain_and_bom_prefixed_json`).
-    if ai_memory_hooks::strip_assistant_message_raw(&mut json) {
-        payload = serde_json::to_string(&json)?;
-    }
+    // Assistant/Stop capture (#196). On an opted-in install
+    // (`install-hooks --capture-assistant`), extract the assistant message,
+    // sanitize + cap it, and splice the versioned `_ai_memory_assistant` marker
+    // into the body. Otherwise just strip any raw assistant field defensively —
+    // the field is never persisted until the server-gated opt-in accepts it.
+    // Reserialize only when the JSON actually changed, so unrelated events keep
+    // byte-exact spool bodies (see `native_hook_accepts_plain_and_bom_prefixed_json`).
+    let capture_assistant = if args.capture_assistant {
+        let transform = ai_memory_hooks::transform_for_client(
+            &mut json,
+            AgentKind::from_wire(&args.agent),
+            ai_memory_hooks::HookEvent::parse(&args.event),
+        );
+        if transform.changed {
+            payload = serde_json::to_string(&json)?;
+        }
+        transform.captured
+    } else {
+        if ai_memory_hooks::strip_assistant_message_raw(&mut json) {
+            payload = serde_json::to_string(&json)?;
+        }
+        false
+    };
     let (policy_cwd, canonical_session_id) = hook_context(&args.agent, &json);
     let policy = policy_cwd.as_deref().map(capture_policy);
     let tool_event = is_tool_event(&args.event);
@@ -411,9 +424,17 @@ where
             .ok()
             .flatten()
             .is_some();
+    // Append the opt-in capture flag outside the marker query so the server can
+    // gate on it (#196). Only present when a valid protocol was actually spliced
+    // into this event's body, so the flag and the marker always travel together.
+    let capture_qs = if capture_assistant {
+        "&capture_assistant=1"
+    } else {
+        ""
+    };
     let event_url = format!(
-        "{base}/hook?event={}&agent={}{}",
-        args.event, args.agent, hook_qs
+        "{base}/hook?event={}&agent={}{}{}",
+        args.event, args.agent, hook_qs, capture_qs
     );
     let entry = hook_spool::entry_for(
         event_url,
@@ -574,6 +595,7 @@ mod tests {
             auth_token: None,
             project_strategy: None,
             check_capture: false,
+            capture_assistant: false,
         }
     }
 
@@ -1044,6 +1066,7 @@ mod tests {
             auth_token: None,
             project_strategy: None,
             check_capture: false,
+            capture_assistant: false,
         };
 
         run_with_payload(
@@ -1085,6 +1108,7 @@ mod tests {
                 auth_token: None,
                 project_strategy: None,
                 check_capture: false,
+                capture_assistant: false,
             };
 
             run_with_payload(
@@ -1125,6 +1149,7 @@ mod tests {
             auth_token: None,
             project_strategy: None,
             check_capture: false,
+            capture_assistant: false,
         };
 
         run_with_payload(Some(data_dir), args, "{}".into(), &mut stdout, |_path| {
@@ -1151,6 +1176,7 @@ mod tests {
             auth_token: None,
             project_strategy: None,
             check_capture: false,
+            capture_assistant: false,
         };
 
         run_with_payload(

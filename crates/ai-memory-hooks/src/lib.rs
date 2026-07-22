@@ -32,7 +32,12 @@ pub mod workstream;
 // Re-export the sanitizer types from core so callers that grew up
 // pointing at this crate's `sanitize` module keep working.
 pub use ai_memory_core::{SanitizeConfig, Sanitized, Sanitizer};
-pub use assistant_capture::strip_assistant_message_raw;
+// Client-side symbols used by the CLI crate; the server-side `apply_assistant_backstop`
+// and the protocol/table internals stay crate-private (router reaches them via
+// `crate::assistant_capture`).
+pub use assistant_capture::{
+    ClientAssistantTransform, strip_assistant_message_raw, transform_for_client,
+};
 pub use capture_policy::{
     CaptureConfig, CaptureDecision, CaptureDisposition, CapturePolicy, CaptureProtocol,
     CaptureSource, ExtractionState, PolicyState, ToolFamily,

@@ -261,6 +261,7 @@ pub(crate) fn build_claude_code_payload_with_data_dir(
     auth_token: Option<&str>,
     data_dir: Option<&Path>,
     project_strategy: Option<&str>,
+    capture_assistant: bool,
 ) -> serde_json::Value {
     build_hook_payload_for_platform(
         &CLAUDE_CODE_EVENTS,
@@ -274,7 +275,8 @@ pub(crate) fn build_claude_code_payload_with_data_dir(
             data_dir,
             project_strategy,
         )
-        .allow_claude_windows_exec(),
+        .allow_claude_windows_exec()
+        .with_capture_assistant(capture_assistant),
     )
 }
 
@@ -776,6 +778,9 @@ struct HookCommandContext<'a> {
     /// snippets keep command-string script fallback even when the platform env
     /// is overridden to `windows-native`.
     claude_windows_exec_allowed: bool,
+    /// Bake `--capture-assistant` onto the native `stop` command only (#196).
+    /// Set exclusively by `install-hooks --agent claude-code --capture-assistant`.
+    capture_assistant: bool,
 }
 
 impl<'a> HookCommandContext<'a> {
@@ -791,12 +796,29 @@ impl<'a> HookCommandContext<'a> {
             data_dir,
             project_strategy,
             claude_windows_exec_allowed: false,
+            capture_assistant: false,
         }
     }
 
     const fn allow_claude_windows_exec(mut self) -> Self {
         self.claude_windows_exec_allowed = true;
         self
+    }
+
+    const fn with_capture_assistant(mut self, on: bool) -> Self {
+        self.capture_assistant = on;
+        self
+    }
+}
+
+/// Bake `--capture-assistant` onto the native `stop` command only (#196), so the
+/// other events stay byte-identical. Empty for every other event, and for a
+/// context that did not opt in.
+fn native_capture_assistant_arg(context: HookCommandContext<'_>, event: &str) -> &'static str {
+    if context.capture_assistant && event == "stop" {
+        " --capture-assistant"
+    } else {
+        ""
     }
 }
 
@@ -1067,6 +1089,7 @@ fn hook_command(
                 context.project_strategy,
                 NativeQuote::Windows,
             ));
+            cmd.push_str(native_capture_assistant_arg(context, event));
             cmd
         }
         HookCommandPlatform::PosixNative => {
@@ -1095,6 +1118,7 @@ fn hook_command(
                 context.project_strategy,
                 NativeQuote::Posix,
             ));
+            cmd.push_str(native_capture_assistant_arg(context, event));
             cmd
         }
     }
@@ -1150,6 +1174,11 @@ fn windows_native_exec_spec_with_exe(
     if let Some(strategy) = context.project_strategy {
         args.push("--project-strategy".to_string());
         args.push(strategy.to_string());
+    }
+    // Native-exec is the PRIMARY Windows Claude Code path, so the flag must be
+    // baked here too — not only in the string form above (#196).
+    if context.capture_assistant && event == "stop" {
+        args.push("--capture-assistant".to_string());
     }
     HookHandlerSpec::Exec {
         command: plain_windows_path_arg(exe),
@@ -1878,6 +1907,65 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
         assert_eq!(command, r"C:\Program Files\ai-memory\ai-memory.exe");
         assert_eq!(args[1], r"C:\Data\ai-memory");
         assert!(args.iter().all(|arg| !arg.contains(r"\\?\")));
+    }
+
+    fn exec_args(script: &str, capture_assistant: bool) -> Vec<String> {
+        let spec = windows_native_exec_spec_with_exe(
+            Path::new(r"C:\ai-memory\ai-memory.exe"),
+            Path::new(script),
+            "http://h:49374",
+            None,
+            HookCommandContext::new(
+                HookCommandPlatform::WindowsNative,
+                "claude-code",
+                None,
+                None,
+            )
+            .with_capture_assistant(capture_assistant),
+        );
+        let HookHandlerSpec::Exec { args, .. } = spec else {
+            panic!("expected exec spec")
+        };
+        args
+    }
+
+    #[test]
+    fn capture_assistant_exec_flag_only_on_stop_and_only_when_opted_in() {
+        // Bare filenames so `file_stem()` yields the event on any host (a
+        // backslash path is a single component on Unix).
+        // Opted in: only the `stop` command carries the flag (#196, D1).
+        assert!(exec_args("stop.sh", true).contains(&"--capture-assistant".to_string()));
+        assert!(
+            !exec_args("session-start.sh", true).contains(&"--capture-assistant".to_string()),
+            "flag must not leak onto non-stop commands"
+        );
+        // Not opted in: even the stop command stays byte-identical to before.
+        assert!(
+            !exec_args("stop.sh", false).contains(&"--capture-assistant".to_string()),
+            "flag must be absent without opt-in"
+        );
+    }
+
+    #[test]
+    fn capture_assistant_string_form_only_on_stop() {
+        // POSIX + Windows string forms: the flag rides only the stop command.
+        for platform in [
+            HookCommandPlatform::PosixNative,
+            HookCommandPlatform::WindowsNative,
+        ] {
+            let ctx = HookCommandContext::new(platform, "claude-code", None, None)
+                .with_capture_assistant(true);
+            let stop = hook_command(Path::new("stop.sh"), "http://h", None, ctx);
+            let start = hook_command(Path::new("session-start.sh"), "http://h", None, ctx);
+            assert!(
+                stop.contains("--capture-assistant"),
+                "{platform:?} stop missing flag: {stop}"
+            );
+            assert!(
+                !start.contains("--capture-assistant"),
+                "{platform:?} session-start must not carry flag: {start}"
+            );
+        }
     }
 
     #[test]

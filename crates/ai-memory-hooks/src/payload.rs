@@ -58,6 +58,12 @@ pub struct HookQuery {
     /// Invocation-scoped `ai-memory run` lease. Absent for every direct
     /// harness launch, preserving legacy capture and handoff behavior.
     pub managed_run: Option<String>,
+    /// Client-side opt-in for assistant/Stop capture, baked onto the native
+    /// `stop` hook command by `install-hooks --capture-assistant`. A truthy
+    /// value tells the server the client deliberately attached a sanitized
+    /// `_ai_memory_assistant` excerpt; the server still gates on its own
+    /// `capture_assistant` config before persisting it (#196).
+    pub capture_assistant: Option<String>,
 }
 
 /// Coalesced view of an incoming hook event after light parsing of the
@@ -99,6 +105,11 @@ pub struct HookEnvelope {
     pub extension: Option<String>,
     /// Optional source event name from the extension vocabulary.
     pub source_event: Option<String>,
+    /// Whether the client requested assistant/Stop capture for this event
+    /// (the `capture_assistant` query flag baked onto the native `stop`
+    /// command). The server still gates on its own `capture_assistant` config
+    /// before honoring it (#196).
+    pub capture_assistant_requested: bool,
     /// Optional title hint extracted from the body.
     pub title_hint: Option<String>,
     /// Optional body excerpt extracted from the agent's raw payload.
@@ -125,6 +136,10 @@ impl std::fmt::Debug for HookEnvelope {
                 &self.recall_default_global_requested,
             )
             .field("managed_run", &self.managed_run)
+            .field(
+                "capture_assistant_requested",
+                &self.capture_assistant_requested,
+            )
             .field("extension", &self.extension)
             .field("source_event", &self.source_event)
             .field(
@@ -358,6 +373,7 @@ impl HookEnvelope {
         let drop_subagent_requested = query_flag_truthy(query.drop_subagent.as_deref());
         let recall_default_global_requested = query_flag_truthy(query.default_global.as_deref());
         let managed_run = query.managed_run.filter(|value| !value.trim().is_empty());
+        let capture_assistant_requested = query_flag_truthy(query.capture_assistant.as_deref());
         let extension = normalize_extension_name(query.extension.as_deref());
         let source_event = extension.as_ref().and_then(|_| {
             let raw_source = query
@@ -415,6 +431,7 @@ impl HookEnvelope {
             drop_subagent_requested,
             recall_default_global_requested,
             managed_run,
+            capture_assistant_requested,
             extension,
             source_event,
             title_hint,
@@ -734,25 +751,31 @@ fn truncate_for_title(s: &str) -> String {
 }
 
 fn truncate_excerpt(s: &str) -> String {
-    const MAX: usize = 2_000;
-    if s.len() <= MAX {
-        s.to_string()
-    } else {
-        // Reserve the ellipsis within the byte cap, not beyond it.
-        let limit = MAX - '…'.len_utf8();
-        let mut buf = String::with_capacity(MAX);
-        let mut end = 0;
-        for (idx, ch) in s.char_indices() {
-            let next = idx + ch.len_utf8();
-            if next > limit {
-                break;
-            }
-            end = next;
-        }
-        buf.push_str(&s[..end]);
-        buf.push('…');
-        buf
+    truncate_utf8_bytes(s, 2_000)
+}
+
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, reserving the
+/// ellipsis within the cap (never beyond it). Shared by the tool-excerpt cap
+/// and the opt-in assistant excerpt cap (#196) so there is one UTF-8-safe
+/// truncation, two named caps.
+pub(crate) fn truncate_utf8_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
     }
+    // Reserve the ellipsis within the byte cap, not beyond it.
+    let limit = max.saturating_sub('…'.len_utf8());
+    let mut buf = String::with_capacity(max);
+    let mut end = 0;
+    for (idx, ch) in s.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > limit {
+            break;
+        }
+        end = next;
+    }
+    buf.push_str(&s[..end]);
+    buf.push('…');
+    buf
 }
 
 fn normalize_extension_name(value: Option<&str>) -> Option<String> {

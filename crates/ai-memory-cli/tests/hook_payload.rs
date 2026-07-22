@@ -13,18 +13,26 @@ fn run_hook(data_dir: &Path, payload: &[u8]) -> Output {
 }
 
 fn run_hook_event(data_dir: &Path, event: &str, payload: &[u8]) -> Output {
+    run_hook_full(data_dir, event, payload, false)
+}
+
+fn run_hook_full(data_dir: &Path, event: &str, payload: &[u8], capture_assistant: bool) -> Output {
+    let mut args = vec![
+        "hook".to_string(),
+        "--event".to_string(),
+        event.to_string(),
+        "--agent".to_string(),
+        "claude-code".to_string(),
+        "--server-url".to_string(),
+        "http://127.0.0.1:1".to_string(),
+    ];
+    if capture_assistant {
+        args.push("--capture-assistant".to_string());
+    }
     let mut child = Command::new(bin())
         .args(["--data-dir"])
         .arg(data_dir)
-        .args([
-            "hook",
-            "--event",
-            event,
-            "--agent",
-            "claude-code",
-            "--server-url",
-            "http://127.0.0.1:1",
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,6 +64,17 @@ fn spooled_body(data_dir: &Path) -> String {
         serde_json::from_slice(&std::fs::read(entries[0].path()).expect("read spool entry"))
             .expect("parse spool entry");
     entry["body"].as_str().expect("spooled body").to_owned()
+}
+
+fn spooled_entry(data_dir: &Path) -> serde_json::Value {
+    // Use the filtered helper: boundary events spawn a detached drainer, so the
+    // spool directory can also hold `.drain.lock` / `.json.tmp` while that child
+    // is alive. Counting raw directory entries races with it (Windows loses most
+    // often).
+    let entries = spool_entries(data_dir);
+    assert_eq!(entries.len(), 1);
+    serde_json::from_slice(&std::fs::read(entries[0].path()).expect("read spool entry"))
+        .expect("parse spool entry")
 }
 
 #[test]
@@ -156,5 +175,61 @@ fn spool_files_never_leak_the_assistant_field_on_disk() {
     assert!(
         !text.contains("last_assistant_message"),
         "raw assistant field key leaked into the spool file bytes"
+    );
+}
+
+#[test]
+fn opted_in_stop_splices_protocol_and_capture_flag() {
+    // With --capture-assistant, a Stop event spools the sanitized protocol
+    // marker (NOT the raw field) and carries capture_assistant=1 on the URL so
+    // the server can gate on it (#196).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let payload = br#"{"session_id":"opt-in","last_assistant_message":"the fix is here"}"#;
+
+    let output = run_hook_full(tmp.path(), "stop", payload, true);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{}\n");
+
+    let entry = spooled_entry(tmp.path());
+    let body = entry["body"].as_str().expect("spooled body");
+    let url = entry["url"].as_str().expect("spooled url");
+    assert!(
+        !body.contains("last_assistant_message"),
+        "raw field survived: {body}"
+    );
+    assert!(
+        body.contains("_ai_memory_assistant"),
+        "protocol marker missing: {body}"
+    );
+    assert!(
+        body.contains("the fix is here"),
+        "excerpt missing from protocol: {body}"
+    );
+    assert!(
+        url.contains("capture_assistant=1"),
+        "capture flag missing from url: {url}"
+    );
+}
+
+#[test]
+fn opted_in_non_stop_event_is_inert() {
+    // The flag is a no-op on non-Stop events: no protocol, no capture flag, and
+    // (absent any assistant field) the body is byte-exact.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let payload = br#"{"session_id":"opt-in","prompt":"hello"}"#;
+
+    let output = run_hook_full(tmp.path(), "user-prompt-submit", payload, true);
+    assert!(output.status.success());
+
+    let entry = spooled_entry(tmp.path());
+    let url = entry["url"].as_str().expect("spooled url");
+    assert!(
+        !url.contains("capture_assistant=1"),
+        "capture flag leaked onto a non-stop event: {url}"
+    );
+    assert_eq!(
+        entry["body"].as_str().expect("spooled body").as_bytes(),
+        payload,
+        "unrelated event body must stay byte-exact"
     );
 }

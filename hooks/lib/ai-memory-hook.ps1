@@ -187,6 +187,13 @@ function Invoke-AiMemoryHook {
 
     $Server = if ($env:AI_MEMORY_HOOK_URL) { $env:AI_MEMORY_HOOK_URL } else { "http://127.0.0.1:49374" }
     $Payload = Read-AiMemoryStdin
+    # Assistant/Stop capture (#196) is native-only. Scoped to claude-code + stop
+    # so a PostToolUse whose tool output legitimately contains the literal string
+    # is unaffected. If a Stop payload still carries the raw field, drop the whole
+    # event rather than POST it verbatim (the script fallback cannot sanitize it).
+    if ($Agent -eq "claude-code" -and $Event -eq "stop" -and $Payload -and $Payload.Contains('"last_assistant_message"')) {
+        return
+    }
     $Cwd = Resolve-AiMemoryCwd -Payload $Payload -Agent $Agent
     $QS = Get-AiMemoryMarkerQuery -Cwd $Cwd
     if ($env:AI_MEMORY_RUN_ID) {

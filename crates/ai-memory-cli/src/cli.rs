@@ -1345,6 +1345,13 @@ pub struct HookArgs {
     /// Inspect capture policy without spooling, draining, or contacting the server.
     #[arg(long)]
     pub check_capture: bool,
+    /// Opt in to assistant/Stop capture: on a Claude Code `stop` event, attach a
+    /// sanitized, capped excerpt of the assistant's final turn as the Stop body.
+    /// Baked onto the native `stop` command by
+    /// `install-hooks --capture-assistant`; the server must also enable
+    /// `capture_assistant`. No effect on other events (#196).
+    #[arg(long)]
+    pub capture_assistant: bool,
 }
 
 /// Arguments for hidden `hook-drain`.
@@ -1413,6 +1420,13 @@ pub struct InstallHooksArgs {
     /// identical to prior behavior.
     #[arg(long, value_enum, default_value_t = ProjectStrategyArg::Basename)]
     pub project_strategy: ProjectStrategyArg,
+    /// Bake `--capture-assistant` onto the installed native `stop` command so a
+    /// Claude Code `stop` event carries a sanitized excerpt of the assistant's
+    /// final turn (#196). Only valid for `--agent claude-code` on a native
+    /// platform; the server must also set `capture_assistant = true`. Re-running
+    /// without this flag removes it (idempotent). Default off.
+    #[arg(long)]
+    pub capture_assistant: bool,
 }
 
 /// Arguments for `install-mcp`.

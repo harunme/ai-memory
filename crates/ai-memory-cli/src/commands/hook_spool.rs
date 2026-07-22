@@ -944,6 +944,42 @@ mod tests {
         assert_eq!(loaded.body, body, "clean body must stay byte-exact");
     }
 
+    #[test]
+    fn drain_preserves_capture_flag_and_protocol_round_trip() {
+        // An opted-in Stop entry carries `capture_assistant=1` on the URL and the
+        // sanitized `_ai_memory_assistant` marker in the body. The drain must
+        // preserve BOTH through spool → load → batch: the load-time strip only
+        // targets the raw `last_assistant_message`, never the protocol (#196).
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        let entry = entry_for(
+            "https://x/hook?event=stop&agent=claude-code&capture_assistant=1".into(),
+            r#"{"session_id":"s","_ai_memory_assistant":{"version":1,"excerpt":"done"}}"#.into(),
+            None,
+            false,
+        );
+        enqueue(&spool, &entry).unwrap();
+        let path = list_entries(&spool).unwrap().into_iter().next().unwrap();
+
+        let mut result = DrainResult::default();
+        let loaded = load_live_entry(&path, &mut result).expect("entry is live");
+        assert!(loaded.url.contains("capture_assistant=1"), "flag dropped");
+        assert!(
+            loaded.body.contains("_ai_memory_assistant"),
+            "protocol dropped"
+        );
+
+        let batch = batch_payload(&[(path, loaded)]).expect("batch built");
+        assert!(
+            batch.contains("capture_assistant=1"),
+            "batch lost the capture flag: {batch}"
+        );
+        assert!(
+            batch.contains("_ai_memory_assistant"),
+            "batch lost the protocol: {batch}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn enqueue_creates_spool_dir_private() {

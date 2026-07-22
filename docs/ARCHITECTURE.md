@@ -340,6 +340,9 @@ that touch the relevant area.
    (agentmemory #221 / #143.)
 6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>`
    has no other constructor than `sanitize()`. (design-decisions §14.)
+   The opt-in assistant/Stop excerpt (#196) enters through this same
+   boundary: the client sanitizes it before it reaches the wire, and the
+   server re-scrubs it here with its configured patterns before the write.
 7. **JSON-schema structured outputs only.** Native provider JSON
    modes; no XML, no Instructor wrapping. (agentmemory #492 / #539,
    cognee #2840.)

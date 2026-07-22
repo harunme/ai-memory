@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Opt-in assistant/Stop capture for Claude Code (#196). When BOTH the server
+  (`capture_assistant = true` / `AI_MEMORY_CAPTURE_ASSISTANT=true`) and the
+  client (`install-hooks --agent claude-code --capture-assistant`) opt in, a
+  Claude Code `Stop` event carries a sanitized, 2 KB-capped excerpt of the
+  assistant's final turn as the Stop body. The client sanitizes with the
+  built-in patterns and truncates before the excerpt ever touches the spool or
+  wire, splicing a versioned `_ai_memory_assistant` marker into the body and a
+  `capture_assistant=1` flag onto the event URL; the server re-scrubs with its
+  configured `[sanitize]` patterns and re-enforces the 2 KB cap at the
+  persistence boundary (never trusting the client's length). Off by default,
+  and any gate failure (server off, wrong agent/event, malformed or
+  future-versioned marker, empty excerpt) degrades to an empty Stop with the
+  same `202` response. Assistant text is privacy-sensitive — see `SECURITY.md`
+  for what it can contain and where it flows. Script-fallback installs cannot
+  sanitize the field and drop the whole Stop event instead; move to a native
+  install to capture it.
 ## [1.17.3] - 2026-07-22
 
 ### Fixed

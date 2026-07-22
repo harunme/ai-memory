@@ -393,21 +393,45 @@ capability output reflects the selected integration. See the canonical
 [capture exclusions reference](marker-file.md#capture-exclusions).
 
 Some agent harnesses attach the assistant's final turn to their `Stop` event —
-Claude Code sends it as a raw `last_assistant_message`. That text is never
-persisted, and the native hook binary strips the raw field before it can reach
-the local spool or the wire; the server strips it defensively on arrival too.
-Optional assistant/Stop capture proposed in issue #196 remains disabled.
+Claude Code sends it as a raw `last_assistant_message`. By default that text is
+never persisted: the native hook binary strips the raw field before it can reach
+the local spool or the wire, and the server strips it defensively on arrival.
+
+**Opt-in capture (#196).** You can opt in to storing a sanitized, 2 KB-capped
+excerpt of the assistant's final turn as the Stop body. It is a **double
+opt-in** — enable the server first, then the client:
+
+1. **Server:** set `capture_assistant = true` in `config.default.toml` (or
+   `AI_MEMORY_CAPTURE_ASSISTANT=true`) and restart `ai-memory serve`.
+2. **Client:** re-install the Claude Code hooks with the flag:
+
+   ```bash
+   ai-memory install-hooks --agent claude-code --capture-assistant --apply
+   ```
+
+The client sanitizes (built-in patterns) and truncates the excerpt before it
+touches the spool or wire; the server re-scrubs with its `[sanitize]` patterns
+before storing. If either side is off — or the marker is malformed — the Stop
+stays empty. Re-running `install-hooks` without `--capture-assistant` removes
+the flag (idempotent). `--capture-assistant` is Claude Code + native-platform
+only; on any other agent or the script fallback the installer refuses it rather
+than enabling something that cannot take effect. Assistant text is
+privacy-sensitive — read the `SECURITY.md` notes on what it can contain and where
+it flows (consolidation/reviewer prompts, and out to a cloud LLM provider if one
+is configured) before enabling it.
+
 Upgrading the binary is sufficient for native Claude Code installs, and pending
-spooled events drain with the field stripped as well. Installs that run the
+spooled events drain with the raw field stripped as well. Installs that run the
 `.sh`/`.ps1` script fallback (the Docker script bundle or an explicit
-`AI_MEMORY_HOOK_PLATFORM=posix`) still POST the raw field on the local wire
-until they move to native commands. The Docker wrapper deliberately keeps
-script commands because a binary path inside its helper container is not valid
-on the host; running `install-hooks` through that wrapper refreshes the scripts
-but does not convert them. To close the local-wire exposure, install a native
-ai-memory client on the agent host, then use that native executable to run
-`install-hooks --agent claude-code --apply`. If the script fallback is retained,
-the server still strips the field immediately on receipt before persistence.
+`AI_MEMORY_HOOK_PLATFORM=posix`) cannot sanitize the assistant text, so a `Stop`
+payload still carrying the raw field is dropped whole by the script rather than
+POSTed verbatim. The Docker wrapper deliberately keeps script commands because a
+binary path inside its helper container is not valid on the host; running
+`install-hooks` through that wrapper refreshes the scripts but does not convert
+them. To capture assistant text safely, install a native ai-memory client on the
+agent host, then use that native executable to run
+`install-hooks --agent claude-code --apply`. Even if the script fallback is
+retained, the server still strips any raw field on receipt before persistence.
 
 Native `ai-memory hook --event ...` commands spool events locally. Session start
 does a short bounded cleanup drain before fetching a handoff; cancellation-prone

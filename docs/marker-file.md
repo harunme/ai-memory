@@ -203,9 +203,13 @@ its existing tool-response/error excerpt and caps the complete rendered body at
 body, and association is only by matching agent-provided call IDs. User-prompt stores its prompt
 text, notification stores its message/text, and post-compaction stores its
 summary; other event bodies are currently empty unless explicitly supported.
-Stop and assistant-message capture remain disabled and deferred. The metadata
-header is closed; the PostToolUse response/error excerpt remains the existing
-bounded content capture.
+Stop/assistant-message capture is disabled by default and never persisted; it is
+available only through the explicit double opt-in described in the install guide
+(`install-hooks --capture-assistant` on the client plus `capture_assistant` on
+the server), where the excerpt is sanitized on both sides and capped. It is not
+gated by this marker file — assistant text is not path-attributable, so a
+`.ai-memory.toml` cannot narrow it. The metadata header is closed; the
+PostToolUse response/error excerpt remains the existing bounded content capture.
 Capture exclusions are evaluated only where paths have a proven schema, so they
 do not claim to filter those other bodies.
 

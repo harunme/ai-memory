@@ -219,6 +219,18 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
             "[ai-memory] selected shell/PowerShell compatibility path does not enforce capture-policy v1; use a native platform selection or generated integration."
         );
     }
+    // Assistant/Stop capture is Claude Code + native-platform only (#196). No
+    // silent fallback: bail so an operator on a script-fallback platform or a
+    // different agent is told the flag has no effect instead of installing a
+    // command whose capture would be silently dropped.
+    if args.capture_assistant && !capture_assistant_allowed(args.agent) {
+        anyhow::bail!(
+            "--capture-assistant requires --agent claude-code on a native hook platform \
+             (PosixNative/WindowsNative). The current selection uses the script fallback or a \
+             different agent, where the opt-in cannot take effect. Remove --capture-assistant or \
+             switch to a native Claude Code install."
+        );
+    }
     if args.apply {
         return match args.agent {
             AgentChoice::OpenCode => apply_to_opencode_plugin(&server_url, auth, &args),
@@ -290,6 +302,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
                 &config.data_dir,
                 strategy,
                 &settings_path,
+                args.capture_assistant,
             )
         }
         AgentChoice::Codex => {
@@ -790,6 +803,14 @@ fn overlay_event_hooks(
 /// Mutate `~/.claude/settings.json` in place: replace the hook entries
 /// ai-memory cares about (`CLAUDE_CODE_EVENTS`); preserve every other hook the
 /// user has wired up to other tools.
+/// Whether `--capture-assistant` may take effect for this agent + platform
+/// (#196): Claude Code on a native hook platform only. Any other agent or a
+/// script-fallback platform cannot honor the opt-in, so the installer bails
+/// instead of enabling it silently.
+fn capture_assistant_allowed(agent: AgentChoice) -> bool {
+    matches!(agent, AgentChoice::ClaudeCode) && local_hook_policy_v1_supported()
+}
+
 fn apply_to_claude_code_settings(
     hooks_dir: &Path,
     server_url: &str,
@@ -810,6 +831,7 @@ fn apply_to_claude_code_settings(
         auth_token,
         Some(data_dir),
         strategy,
+        args.capture_assistant,
     );
     let our_hooks = payload
         .get("hooks")
@@ -2912,6 +2934,7 @@ fn render_claude_code(
     data_dir: &Path,
     project_strategy: Option<&str>,
     settings_path: &Path,
+    capture_assistant: bool,
 ) -> Result<()> {
     // Soft check: warn (don't bail) if a script is missing. The user
     // may be running this command inside docker against a host path
@@ -2936,6 +2959,7 @@ fn render_claude_code(
         auth_token,
         Some(data_dir),
         project_strategy,
+        capture_assistant,
     );
     let serialized =
         serde_json::to_string_pretty(&payload).context("serializing claude code hook config")?;
@@ -3227,6 +3251,37 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    #[test]
+    fn capture_assistant_allowed_only_for_claude_native() {
+        use crate::cli::AgentChoice::*;
+        // Every non-Claude agent is rejected regardless of platform (#196): the
+        // opt-in cannot take effect for them, so the installer must bail.
+        for agent in [
+            Codex,
+            Cursor,
+            GeminiCli,
+            OpenCode,
+            Pi,
+            Omp,
+            Openclaw,
+            AntigravityCli,
+            Grok,
+            Zero,
+            Devin,
+            KimiCode,
+        ] {
+            assert!(
+                !capture_assistant_allowed(agent),
+                "{agent:?} must not allow --capture-assistant"
+            );
+        }
+        // Claude Code tracks the native-platform gate exactly.
+        assert_eq!(
+            capture_assistant_allowed(ClaudeCode),
+            local_hook_policy_v1_supported()
+        );
+    }
+
     #[cfg(unix)]
     fn bash_program_for_installer_test() -> Option<std::path::PathBuf> {
         Some(std::path::PathBuf::from("bash"))
@@ -3365,6 +3420,7 @@ mod tests {
     fn default_hook_args() -> InstallHooksArgs {
         InstallHooksArgs {
             agent: AgentChoice::OpenCode,
+            capture_assistant: false,
             hooks_dir: None,
             server_url: None,
             auth_token: None,
@@ -3684,6 +3740,7 @@ mod tests {
         .unwrap();
         let args = InstallHooksArgs {
             agent: AgentChoice::Zero,
+            capture_assistant: false,
             config_file: Some(path.clone()),
             ..default_hook_args()
         };
@@ -4503,6 +4560,7 @@ model = "gpt-5"
         let tmp = TempDir::new().unwrap();
         let args = InstallHooksArgs {
             agent: AgentChoice::Omp,
+            capture_assistant: false,
             hooks_dir: None,
             server_url: Some("http://127.0.0.1:49374".into()),
             auth_token: None,
@@ -4531,6 +4589,7 @@ model = "gpt-5"
         let path = tmp.path().join("extensions").join("ai-memory.ts");
         let args = InstallHooksArgs {
             agent: AgentChoice::Pi,
+            capture_assistant: false,
             hooks_dir: None,
             server_url: Some("http://127.0.0.1:49374".into()),
             auth_token: None,
@@ -5303,6 +5362,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,
+                capture_assistant: false,
                 hooks_dir: Some(hooks_tmp.path().to_path_buf()),
                 server_url: Some("http://127.0.0.1:49374".to_string()),
                 auth_token: None,
@@ -5365,6 +5425,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,
+                capture_assistant: false,
                 hooks_dir: Some(hooks_tmp.path().to_path_buf()),
                 server_url: Some("http://127.0.0.1:49374".to_string()),
                 auth_token: None,
@@ -5416,6 +5477,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
 
         let args_v1 = InstallHooksArgs {
             agent: AgentChoice::Devin,
+            capture_assistant: false,
             hooks_dir: Some(hooks_tmp.path().to_path_buf()),
             server_url: Some("http://127.0.0.1:49374".to_string()),
             auth_token: None,
@@ -5460,6 +5522,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
 
         let args_config = InstallHooksArgs {
             agent: AgentChoice::Devin,
+            capture_assistant: false,
             hooks_dir: Some(hooks_tmp.path().to_path_buf()),
             server_url: Some("http://127.0.0.1:49374".to_string()),
             auth_token: None,
@@ -5529,6 +5592,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             config_tmp.path(),
             &InstallHooksArgs {
                 agent: AgentChoice::Devin,
+                capture_assistant: false,
                 hooks_dir: Some(hooks_tmp.path().to_path_buf()),
                 server_url: Some("http://127.0.0.1:49374".to_string()),
                 auth_token: None,
