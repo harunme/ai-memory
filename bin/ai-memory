@@ -507,15 +507,51 @@ fi
 # binary can derive the *real* host-side project name from it. The
 # `commands::resolve_project_name` helper checks this env var first
 # and falls back to the cwd basename only if it's unset.
-exec "${DOCKER}" run --rm ${TTY_ARGS[@]+"${TTY_ARGS[@]}"} \
-  ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} \
-  ${SELINUX_ARGS[@]+"${SELINUX_ARGS[@]}"} \
-  -v "${HOME}:${HOME}" \
-  -v "${PWD}:/work" \
-  -w /work \
-  -e HOME="${HOME}" \
-  -e AI_MEMORY_HOST_CWD="${PWD}" \
-  ${USER_ARGS[@]+"${USER_ARGS[@]}"} \
-  "${DATA_ARGS[@]}" \
-  ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
-  "${IMAGE}" "$@"
+HELPER_ARGS=(run --rm)
+# Bash 3.2 (still shipped by macOS) rejects an empty-array expansion under
+# `set -u`. The `array[@]+...` form appends only arrays with at least one item.
+HELPER_ARGS+=(${TTY_ARGS[@]+"${TTY_ARGS[@]}"})
+HELPER_ARGS+=(${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"})
+HELPER_ARGS+=(${SELINUX_ARGS[@]+"${SELINUX_ARGS[@]}"})
+HELPER_ARGS+=(
+  -v "${HOME}:${HOME}"
+  -v "${PWD}:/work"
+  -w /work
+  -e HOME="${HOME}"
+  -e AI_MEMORY_HOST_CWD="${PWD}"
+)
+HELPER_ARGS+=(${USER_ARGS[@]+"${USER_ARGS[@]}"})
+HELPER_ARGS+=("${DATA_ARGS[@]}")
+HELPER_ARGS+=(${ENV_ARGS[@]+"${ENV_ARGS[@]}"})
+HELPER_ARGS+=("${IMAGE}" "$@")
+
+# The native binary renders completions into a buffer so a short consumer such
+# as `head` can close stdout without surfacing an error. Docker's streaming
+# client does not share that behavior: it reports its own broken pipe before the
+# container can return success. Buffer this bounded, read-only command outside
+# Docker, then preserve the same quiet SIGPIPE behavior while streaming the
+# completed script to the caller. Docker failures still return before any
+# partial completion script is printed.
+if [ "${WRAPPER_SUBCOMMAND}" = "completions" ]; then
+  COMPLETIONS_TMP=$(mktemp "${TMPDIR:-/tmp}/ai-memory-completions.XXXXXX")
+  trap 'rm -f "${COMPLETIONS_TMP}"' EXIT
+  if "${DOCKER}" "${HELPER_ARGS[@]}" >"${COMPLETIONS_TMP}"; then
+    DOCKER_STATUS=0
+  else
+    DOCKER_STATUS=$?
+  fi
+  if [ "${DOCKER_STATUS}" -ne 0 ]; then
+    exit "${DOCKER_STATUS}"
+  fi
+  if cat "${COMPLETIONS_TMP}"; then
+    OUTPUT_STATUS=0
+  else
+    OUTPUT_STATUS=$?
+  fi
+  rm -f "${COMPLETIONS_TMP}"
+  trap - EXIT
+  [ "${OUTPUT_STATUS}" -eq 141 ] && exit 0
+  exit "${OUTPUT_STATUS}"
+fi
+
+exec "${DOCKER}" "${HELPER_ARGS[@]}"

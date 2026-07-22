@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native commands and close the residual local-wire vector ([#196]).
 
 ### Fixed
+- The Docker wrapper now buffers generated shell completions before streaming
+  them to stdout. Piping `ai-memory completions <shell>` into a short-lived
+  consumer such as `head` no longer exposes Docker's own broken-pipe error or
+  non-zero exit after the native command completed successfully; real helper
+  container failures still propagate without printing a partial script.
 - The Linux Docker wrapper now detects an SELinux-enforcing host plus a
   SELinux-enabled daemon and adds `--security-opt label=disable` only to
   short-lived helper commands that write bind-mounted host files. This avoids

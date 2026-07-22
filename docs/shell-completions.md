@@ -13,6 +13,11 @@ completions.
 The command reads no config and does not need a data directory, so it can be
 run before `ai-memory init` or inside a packaging step.
 
+The Docker wrapper buffers this bounded command before writing it to stdout, so
+short consumers such as `head` can close the pipe without Docker adding a
+broken-pipe diagnostic. A helper-container failure still returns non-zero and
+prints no partial completion script.
+
 ## Install
 
 ### fish

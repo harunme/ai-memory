@@ -1,8 +1,12 @@
 //! Packaging asset regression tests.
 
+#[cfg(unix)]
+use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -270,6 +274,107 @@ fn managed_run_wrapper_uses_host_binary_path_and_remote_server_without_docker() 
         )
     );
     assert!(!docker_record.exists(), "managed run entered Docker");
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_wrapper_completions_tolerate_an_early_reader_close() {
+    let tmp = tempfile::tempdir().unwrap();
+    let docker = tmp.path().join("docker");
+    std::fs::write(
+        &docker,
+        "#!/usr/bin/env bash\n\
+         if [ \"$1\" = info ]; then\n\
+           printf '[name=seccomp,profile=default]\\n'\n\
+           exit 0\n\
+         fi\n\
+         if [ \"$1\" = run ]; then\n\
+           i=0\n\
+           while [ \"$i\" -lt 20000 ]; do\n\
+             printf 'complete -c ai-memory -n condition-%s\\n' \"$i\"\n\
+             i=$((i + 1))\n\
+           done\n\
+           exit 0\n\
+         fi\n\
+         exit 1\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut child = shell_script_command(&repo_root().join("bin/ai-memory"))
+        .args(["completions", "fish"])
+        .env("AI_MEMORY_DOCKER", &docker)
+        .env("AI_MEMORY_NO_TTY", "1")
+        .env("AI_MEMORY_NO_VERSION_CHECK", "1")
+        .env("AI_MEMORY_DATA_VOLUME", "test-ai-memory-data")
+        .env("HOME", tmp.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut first_line = String::new();
+    stdout.read_line(&mut first_line).unwrap();
+    drop(stdout);
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(first_line, "complete -c ai-memory -n condition-0\n");
+    assert!(
+        output.status.success(),
+        "early close should stay quiet and successful: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("broken pipe"),
+        "wrapper leaked Docker's broken-pipe diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_wrapper_completions_preserve_helper_failure_without_partial_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let docker = tmp.path().join("docker");
+    std::fs::write(
+        &docker,
+        "#!/usr/bin/env bash\n\
+         if [ \"$1\" = info ]; then\n\
+           printf '[name=seccomp,profile=default]\\n'\n\
+           exit 0\n\
+         fi\n\
+         if [ \"$1\" = run ]; then\n\
+           printf 'partial completion output\\n'\n\
+           printf 'helper failed\\n' >&2\n\
+           exit 42\n\
+         fi\n\
+         exit 1\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = shell_script_command(&repo_root().join("bin/ai-memory"))
+        .args(["completions", "fish"])
+        .env("AI_MEMORY_DOCKER", &docker)
+        .env("AI_MEMORY_NO_TTY", "1")
+        .env("AI_MEMORY_NO_VERSION_CHECK", "1")
+        .env("AI_MEMORY_DATA_VOLUME", "test-ai-memory-data")
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(42));
+    assert!(
+        output.stdout.is_empty(),
+        "failed helper leaked partial completions: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "helper failed\n");
 }
 
 // Unlike run_wrapper_on_fake_macos's docker fake (which only ever sees one
