@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native commands and close the residual local-wire vector ([#196]).
 
 ### Fixed
+- Windows `.ps1` fallback hook commands now use PowerShell `-EncodedCommand`
+  instead of embedding `$env:` setup inside a nested quoted command. This
+  prevents outer Windows hook runners such as Antigravity CLI from expanding
+  the setup before the inner PowerShell process receives it. Existing Windows
+  Docker-wrapper installs should rerun `install-hooks --agent <agent> --apply`
+  after upgrading ([#214]).
 - `install-mcp --client claude-code` and `uninstall` now honour
   `CLAUDE_CONFIG_DIR`: MCP registrations go to
   `$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set (non-empty),

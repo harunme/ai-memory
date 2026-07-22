@@ -333,8 +333,8 @@ parallel subagent support. It uses a separate `mcp_config.json`
 `serverUrl` (not `httpUrl`) for streamable-HTTP endpoints.
 
 ```bash
-# One-shot via CLI:
-ai-memory install-mcp --client antigravity-cli
+# Merge the MCP entry into the Antigravity config:
+ai-memory install-mcp --client antigravity-cli --apply
 ```
 
 The rendered snippet writes to `mcp_config.json` under `mcpServers`:
@@ -408,7 +408,15 @@ The rendered hooks config looks like:
 **Gotchas:**
 - Antigravity CLI uses `serverUrl` for HTTP MCP endpoints, not `url`
   or `httpUrl`. The `--apply` flag writes the correct key.
+- MCP and hooks use separate files: MCP belongs in
+  `~/.gemini/antigravity-cli/mcp_config.json`, while hooks belong in
+  `~/.gemini/config/hooks.json`.
 - Hook scripts are staged under `~/.local/share/ai-memory/hooks/antigravity-cli/`.
+- Native Windows Docker-wrapper installs render hook entries as
+  `powershell.exe ... -EncodedCommand <payload>` so Antigravity's outer command
+  runner cannot expand the inner `$env:` setup. Rerun
+  `install-hooks --agent antigravity-cli --apply` after upgrading to refresh
+  existing entries.
 - The `PreInvocation` event fires before each model call (not just at
   session start). ai-memory uses it as the closest equivalent to Gemini
   CLI's `SessionStart`; when a pending handoff exists, the hook injects

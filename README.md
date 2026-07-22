@@ -380,7 +380,11 @@ one matching entry.
 - **Windows:** use the Linux path inside WSL2, or the native Windows wrapper
   from PowerShell/cmd. Local supported profiles default to host-native commands:
   Claude Code may use its supported `ai-memory.exe` exec form, while other
-  agents use native single command strings matching their hook schema.
+  agents use native single command strings matching their hook schema. The
+  Docker wrapper protects `.ps1` fallback commands from nested PowerShell
+  expansion with `-EncodedCommand`; rerun
+  `install-hooks --agent <agent> --apply` after upgrading so existing hook
+  entries receive the current form.
   PowerShell/Git Bash script bundles are compatibility fallbacks and do not
   enforce capture-policy v1. Do not mix path worlds. See
   [`docs/windows.md`](docs/windows.md).
