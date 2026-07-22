@@ -308,7 +308,7 @@ docker run -d --name ai-memory \
     akitaonrails/ai-memory:latest
 
 # 3. Wire your agent CLI in two commands. The wrapper takes care of
-#    mounts + auto-detecting ~/.claude/settings.json. Re-run with
+#    mounts and each client's config-path detection. Re-run with
 #    `--agent codex`, `--agent devin`, `--agent opencode`, `--agent gemini-cli`,
 #    `--agent grok`, `--agent kimi-code`, `--agent omp`, `--agent oh-my-pi`, `--client cursor`,
 #    `--client gemini-cli`, `--client grok`, etc.
@@ -338,6 +338,14 @@ other server / hook you have configured, and write a timestamped
 scripts are staged into `~/.local/share/ai-memory/hooks/<agent>/`
 automatically; re-running overwrites them so future image updates ship
 updated hooks. Drop `--apply` to print the snippet instead of mutating.
+For Claude Code, `CLAUDE_CONFIG_DIR` relocates MCP registration to
+`$CLAUDE_CONFIG_DIR/.claude.json`, hooks to
+`$CLAUDE_CONFIG_DIR/settings.json`, and global managed skills to
+`$CLAUDE_CONFIG_DIR/skills`. The Docker wrapper forwards this variable when
+the directory is under its existing `$HOME` bind mount. Use the native binary
+when the Claude config root is outside `$HOME`. Uninstall checks both the
+active relocated paths and Claude's home defaults, so enabling the variable
+does not leave an older default-path ai-memory installation behind.
 If your agent often starts inside repository subdirectories or linked
 worktrees, add `--project-strategy repo-root` to `install-hooks` so captures
 collapse to the main git repo name; see [`docs/install.md`](docs/install.md)
@@ -613,7 +621,7 @@ Recommended defaults:
 | `openai-oauth` | `gpt-5.5` | ChatGPT Pro/Plus/Codex backend via `ai-memory auth login openai-oauth`; no Platform API key. |
 | `copilot` | `gpt-5.5` | GitHub Copilot Chat backend via `ai-memory auth login copilot` or `COPILOT_GITHUB_TOKEN`; requires a Copilot subscription. |
 | `gemini` | `gemini-2.5-flash` | Google-hosted option with a generous free tier. |
-| `openai-compat` | no default | OpenRouter, Ollama, vLLM, LM Studio, and other compatible endpoints. |
+| `openai-compat` | no default | OpenRouter, Atlas Cloud, Ollama, vLLM, LM Studio, and other compatible endpoints. |
 
 `openai-oauth` stores a refresh token in `<data_dir>/auth.json` and talks to
 the ChatGPT/Codex Responses backend, not `api.openai.com`. For Docker quick
@@ -656,7 +664,7 @@ Embeddings are optional and separate from the LLM provider. Set
 you want vector reranking in addition to FTS5 + graph-neighbor retrieval.
 
 See [`docs/install.md#llm-provider-tiers`](docs/install.md#llm-provider-tiers)
-for env vars and Ollama/OpenRouter examples, and
+for env vars and Ollama/OpenRouter/Atlas Cloud examples, and
 [`docs/llm-provider-comparison.md`](docs/llm-provider-comparison.md)
 for the empirical model comparison.
 

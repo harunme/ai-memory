@@ -1447,7 +1447,7 @@ pub struct InstallMcpArgs {
     #[arg(long)]
     pub apply: bool,
     /// Override the config-file path. Auto-detected per client when
-    /// absent (e.g. `~/.claude/settings.json` for Claude Code).
+    /// absent (e.g. `~/.claude.json` for Claude Code).
     #[arg(long)]
     pub config_file: Option<PathBuf>,
 }

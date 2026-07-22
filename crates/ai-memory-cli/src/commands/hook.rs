@@ -328,6 +328,16 @@ where
             return Ok(());
         }
     };
+    // Defensively drop any raw assistant-message field (e.g. Claude Code's
+    // `last_assistant_message` on Stop) BEFORE it can reach the local spool or
+    // the wire (#196). Optional capture remains disabled, so stripping it
+    // pre-spool closes a raw-text exposure with no persisted-data behavior
+    // change. Reserialize only when we actually removed something, so unrelated
+    // events keep byte-exact spool
+    // bodies (see `native_hook_accepts_plain_and_bom_prefixed_json`).
+    if ai_memory_hooks::strip_assistant_message_raw(&mut json) {
+        payload = serde_json::to_string(&json)?;
+    }
     let (policy_cwd, canonical_session_id) = hook_context(&args.agent, &json);
     let policy = policy_cwd.as_deref().map(capture_policy);
     let tool_event = is_tool_event(&args.event);

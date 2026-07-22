@@ -9,13 +9,17 @@ fn bin() -> &'static str {
 }
 
 fn run_hook(data_dir: &Path, payload: &[u8]) -> Output {
+    run_hook_event(data_dir, "pre-tool-use", payload)
+}
+
+fn run_hook_event(data_dir: &Path, event: &str, payload: &[u8]) -> Output {
     let mut child = Command::new(bin())
         .args(["--data-dir"])
         .arg(data_dir)
         .args([
             "hook",
             "--event",
-            "pre-tool-use",
+            event,
             "--agent",
             "claude-code",
             "--server-url",
@@ -35,12 +39,18 @@ fn run_hook(data_dir: &Path, payload: &[u8]) -> Output {
     child.wait_with_output().expect("wait for native hook")
 }
 
-fn spooled_body(data_dir: &Path) -> String {
-    let spool = data_dir.join("hook-spool");
-    let entries = std::fs::read_dir(spool)
+fn spool_entries(data_dir: &Path) -> Vec<std::fs::DirEntry> {
+    std::fs::read_dir(data_dir.join("hook-spool"))
         .expect("hook spool")
         .collect::<Result<Vec<_>, _>>()
-        .expect("spool entries");
+        .expect("spool entries")
+        .into_iter()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .collect()
+}
+
+fn spooled_body(data_dir: &Path) -> String {
+    let entries = spool_entries(data_dir);
     assert_eq!(entries.len(), 1);
     let entry: serde_json::Value =
         serde_json::from_slice(&std::fs::read(entries[0].path()).expect("read spool entry"))
@@ -89,4 +99,62 @@ fn malformed_native_hook_payload_warns_without_leaking_or_spooling() {
     );
     assert!(!stderr.contains("SENTINEL_PRIVATE_PAYLOAD"));
     assert!(!tmp.path().join("hook-spool").exists());
+}
+
+#[test]
+fn stop_hook_strips_last_assistant_message_from_spool_and_stderr() {
+    // A well-formed Stop payload carrying Claude Code's `last_assistant_message`
+    // must be spooled WITHOUT that raw field (#196). Optional capture remains
+    // disabled, so the field must not reach the spool, wire, or stderr.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let payload = br#"{"session_id":"stop-strip","cwd":"/tmp/project","last_assistant_message":"SENTINEL_ASSISTANT_MESSAGE"}"#;
+
+    let output = run_hook_event(tmp.path(), "stop", payload);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{}\n");
+    assert!(
+        output.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let body = spooled_body(tmp.path());
+    assert!(
+        !body.contains("SENTINEL_ASSISTANT_MESSAGE"),
+        "spooled body still carries the assistant message: {body}"
+    );
+    assert!(
+        !body.contains("last_assistant_message"),
+        "spooled body still carries the raw field key: {body}"
+    );
+    // Unrelated fields survive so the Stop event is still ingested.
+    assert!(
+        body.contains("stop-strip"),
+        "session_id was dropped: {body}"
+    );
+}
+
+#[test]
+fn spool_files_never_leak_the_assistant_field_on_disk() {
+    // Byte-level check across the whole spool file (not just the parsed body):
+    // neither the value nor the raw key may survive anywhere in the entry.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let payload =
+        br#"{"session_id":"disk-scan","last_assistant_message":"SENTINEL_ASSISTANT_MESSAGE"}"#;
+
+    let output = run_hook_event(tmp.path(), "stop", payload);
+    assert!(output.status.success());
+
+    let entries = spool_entries(tmp.path());
+    assert_eq!(entries.len(), 1);
+    let bytes = std::fs::read(entries[0].path()).expect("read spool entry");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        !text.contains("SENTINEL_ASSISTANT_MESSAGE"),
+        "assistant message leaked into the spool file bytes"
+    );
+    assert!(
+        !text.contains("last_assistant_message"),
+        "raw assistant field key leaked into the spool file bytes"
+    );
 }

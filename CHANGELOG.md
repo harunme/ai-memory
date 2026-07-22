@@ -14,6 +14,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per shell are documented in `docs/shell-completions.md`. The command reads no
   config and needs no data directory, so it works before `ai-memory init`.
 
+### Changed
+- Documented Atlas Cloud through the existing `openai-compat` provider instead
+  of adding a redundant provider type, including the endpoint, model, and API
+  key mapping needed for deployment.
+- The native hook binary now drops any raw assistant-message field (Claude
+  Code's `last_assistant_message` on `Stop`) before it can reach the local
+  spool or the wire, and drains pre-existing spooled entries with the field
+  stripped too. The server applies the same strip defensively on `/hook` and
+  `/hook/batch` before building an envelope. This field was already never
+  persisted, so there is no behavior change; it closes a raw-text exposure in
+  the spool/wire. Optional assistant/Stop capture proposed in #196 remains
+  disabled. Upgrading the binary is sufficient for native Claude Code installs;
+  script-fallback installs (Docker wrapper, `AI_MEMORY_HOOK_PLATFORM=posix`)
+  should run `ai-memory install-hooks --agent claude-code --apply` to migrate to
+  native commands and close the residual local-wire vector ([#196]).
+
+### Fixed
+- `install-mcp --client claude-code` and `uninstall` now honour
+  `CLAUDE_CONFIG_DIR`: MCP registrations go to
+  `$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set (non-empty),
+  falling back to `~/.claude.json` otherwise. Uninstall checks both the active
+  relocated path and the home default so enabling the variable does not orphan
+  a prior default-path registration. The
+  dry-run output prints the resolved config path instead of a hardcoded path.
+- `install-hooks --agent claude-code` and `setup-agent` follow the same
+  resolution for the hooks settings file: `$CLAUDE_CONFIG_DIR/settings.json`
+  when set, else `~/.claude/settings.json`. Uninstall checks both locations;
+  rendered output and the chmod-600 warning show the resolved path.
+- `install-skills --scope global` (claude-code root) installs to
+  `$CLAUDE_CONFIG_DIR/skills` when the variable is set, else
+  `~/.claude/skills`. `uninstall` sweeps the relocated root alongside the
+  home default so installs that predate the env var are still removed.
+- The Docker CLI wrapper forwards `CLAUDE_CONFIG_DIR` into its helper
+  container for relocated Claude Code configs beneath the existing home bind.
+
 ## [1.17.1] - 2026-07-20
 
 ### Fixed
@@ -96,7 +131,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model now selects the documented recommended defaults, `claude-haiku-4-5`
   and `gpt-5.4-mini`, instead of the older `claude-sonnet-4-6` and
   `gpt-4o-mini` fallbacks. Explicit `AI_MEMORY_LLM_MODEL` values are unchanged.
-
 ### Fixed
 - User-facing help and current-reference documentation now match the shipped
   agent integrations, multi-user activation boundary, MCP URL normalization,

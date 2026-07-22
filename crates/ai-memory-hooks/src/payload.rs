@@ -63,7 +63,7 @@ pub struct HookQuery {
 /// Coalesced view of an incoming hook event after light parsing of the
 /// body. We keep the original raw JSON around so consumers can extract
 /// agent-specific fields they care about.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct HookEnvelope {
     /// Mapped lifecycle event.
     pub event: HookEvent,
@@ -105,6 +105,39 @@ pub struct HookEnvelope {
     pub body_excerpt: Option<String>,
     /// The agent's raw JSON, kept for forensics.
     pub raw: serde_json::Value,
+}
+
+/// Manual `Debug` that omits raw and derived hook content. A stray `?env` or
+/// `%env` in a tracing span must not copy prompt or tool content into logs.
+impl std::fmt::Debug for HookEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookEnvelope")
+            .field("event", &self.event)
+            .field("agent", &self.agent)
+            .field("session_id", &self.session_id)
+            .field("cwd", &self.cwd)
+            .field("workspace_override", &self.workspace_override)
+            .field("project_override", &self.project_override)
+            .field("project_strategy", &self.project_strategy)
+            .field("drop_subagent_requested", &self.drop_subagent_requested)
+            .field(
+                "recall_default_global_requested",
+                &self.recall_default_global_requested,
+            )
+            .field("managed_run", &self.managed_run)
+            .field("extension", &self.extension)
+            .field("source_event", &self.source_event)
+            .field(
+                "title_hint",
+                &self.title_hint.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "body_excerpt",
+                &self.body_excerpt.as_ref().map(|_| "<redacted>"),
+            )
+            .field("raw", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Keys by which agent harnesses tag a hook event as belonging to a SUBAGENT
@@ -789,6 +822,39 @@ mod tests {
         assert_eq!(HookEvent::parse("PreToolUse"), HookEvent::PreToolUse);
         assert_eq!(HookEvent::parse("user_prompt"), HookEvent::UserPrompt);
         assert_eq!(HookEvent::parse("bogus"), HookEvent::Other);
+    }
+
+    #[test]
+    fn debug_never_renders_hook_content() {
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt".into(),
+                agent: Some("claude-code".into()),
+                managed_run: Some("run-1".into()),
+                ..Default::default()
+            },
+            serde_json::json!({
+                "session_id": "dbg",
+                "prompt": "SENTINEL_DERIVED_CONTENT",
+                "secret": "SENTINEL_RAW_PAYLOAD",
+            }),
+        );
+        assert_eq!(
+            env.body_excerpt.as_deref(),
+            Some("SENTINEL_DERIVED_CONTENT")
+        );
+        let rendered = format!("{env:?}");
+        assert!(
+            !rendered.contains("SENTINEL_RAW_PAYLOAD"),
+            "Debug leaked the raw payload: {rendered}"
+        );
+        assert!(
+            !rendered.contains("SENTINEL_DERIVED_CONTENT"),
+            "Debug leaked derived hook content: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "raw was not redacted");
+        assert!(rendered.contains("UserPrompt"), "event field went missing");
+        assert!(rendered.contains("run-1"), "managed run field went missing");
     }
 
     #[test]

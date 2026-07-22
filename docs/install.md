@@ -68,6 +68,18 @@ ai-memory install-mcp   --client claude-code --apply
 ai-memory install-hooks --agent  claude-code --apply
 ```
 
+If `CLAUDE_CONFIG_DIR` is set, the claude-code installers match Claude Code's
+own config resolution: `install-mcp` writes the MCP registration to
+`$CLAUDE_CONFIG_DIR/.claude.json` (instead of `~/.claude.json`),
+`install-hooks` / `setup-agent` target `$CLAUDE_CONFIG_DIR/settings.json`
+(instead of `~/.claude/settings.json`), and `install-skills --scope global`
+uses `$CLAUDE_CONFIG_DIR/skills` (instead of `~/.claude/skills`). `uninstall`
+sweeps the active relocated paths alongside the home defaults. It cannot
+discover an older arbitrary `CLAUDE_CONFIG_DIR` that is no longer set. The
+Docker wrapper forwards the variable for config roots under its existing
+`$HOME` bind mount; use the native binary when the relocated root is outside
+`$HOME`.
+
 The CLI commands (`bootstrap`, `status`, `search`, `lint`, `auto-improve`,
 `curator`, `pending-writes`, etc.) inherit the two env vars automatically. So do
 `install-mcp`, `install-hooks`, and
@@ -379,6 +391,18 @@ Docker script bundles do not enforce it. Re-run `install-hooks --agent <agent>
 --apply` or refresh/reinstall generated plugins after upgrading; installer
 capability output reflects the selected integration. See the canonical
 [capture exclusions reference](marker-file.md#capture-exclusions).
+
+Some agent harnesses attach the assistant's final turn to their `Stop` event —
+Claude Code sends it as a raw `last_assistant_message`. That text is never
+persisted, and the native hook binary strips the raw field before it can reach
+the local spool or the wire; the server strips it defensively on arrival too.
+Optional assistant/Stop capture proposed in issue #196 remains disabled.
+Upgrading the binary is sufficient for native Claude Code installs, and pending
+spooled events drain with the field stripped as well. Installs that run the
+`.sh`/`.ps1` script fallback (the Docker script bundle or an explicit
+`AI_MEMORY_HOOK_PLATFORM=posix`) still POST the raw field on the local wire
+until they move to native commands: run `install-hooks --agent claude-code
+--apply`, which installs native `ai-memory hook` commands where supported.
 
 Native `ai-memory hook --event ...` commands spool events locally. Session start
 does a short bounded cleanup drain before fetching a handoff; cancellation-prone
@@ -1034,7 +1058,7 @@ Advanced users with a pre-minted Copilot API token can set
 Pass `--client-id` or set `AI_MEMORY_COPILOT_CLIENT_ID` if you operate your own
 OAuth app.
 
-### Self-hosted LLMs (Ollama / vLLM / LM Studio / OpenRouter)
+### OpenAI-compatible providers (Ollama / vLLM / LM Studio / hosted APIs)
 
 ```bash
 docker run -d --name ai-memory \
@@ -1056,6 +1080,20 @@ required. For OpenRouter (Kimi, DeepSeek, etc.):
 -e AI_MEMORY_LLM_MODEL=moonshotai/kimi-k2.6
 -e LLM_API_KEY=sk-or-v1-...
 ```
+
+[Atlas Cloud](https://www.atlascloud.ai/models/qwen/qwen3.5-flash) uses the
+same provider; no Atlas-specific ai-memory provider is needed. Pass its API key
+through the generic compatibility credential:
+
+```bash
+-e AI_MEMORY_LLM_PROVIDER=openai-compat
+-e AI_MEMORY_LLM_BASE_URL=https://api.atlascloud.ai/v1
+-e AI_MEMORY_LLM_MODEL=qwen/qwen3.5-flash
+-e LLM_API_KEY="$ATLASCLOUD_API_KEY"
+```
+
+Replace the model with another current Atlas model id when needed. ai-memory
+does not select a default for hosted compatibility endpoints.
 
 Modern Ollama, vLLM, LM Studio, llama.cpp, and gateway endpoints may honour
 OpenAI-style `response_format=json_schema`. If the tolerant default parser fails
