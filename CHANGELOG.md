@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Corrected Docker-wrapper upgrade guidance: `ai-memory upgrade` no longer
+  claims a configured remote server is stale when it cannot inspect that
+  deployment, and the install guide now makes clear that refreshing Docker
+  script hooks does not convert them to native capture-policy commands.
+
 ## [1.17.2] - 2026-07-22
 
 ### Added
@@ -29,8 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the spool/wire. Optional assistant/Stop capture proposed in #196 remains
   disabled. Upgrading the binary is sufficient for native Claude Code installs;
   script-fallback installs (Docker wrapper, `AI_MEMORY_HOOK_PLATFORM=posix`)
-  should run `ai-memory install-hooks --agent claude-code --apply` to migrate to
-  native commands and close the residual local-wire vector ([#196]).
+  still send the raw field to the server, which strips it immediately on
+  receipt. Closing the local-wire vector requires a native client on the agent
+  host and using it to reinstall hooks; running the installer through the
+  Docker wrapper only refreshes its scripts ([#196]).
 
 ### Fixed
 - Removed the unused `syntect` dependency and its `plist`, `quick-xml`,

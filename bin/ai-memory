@@ -181,18 +181,16 @@ cmd_upgrade() {
     fi
   fi
 
-  # If the server runs on a different host (homelab scenario), only
-  # the local wrapper + image + hook scripts got refreshed here.
-  # Surface that, because the user still needs to deploy on the
-  # remote box for the server-side binary to update.
+  # If the server runs on a different host (homelab scenario), this command
+  # cannot know or change that host's deployment state.
   if [ -n "${AI_MEMORY_SERVER_URL:-}" ] \
      && ! echo "${AI_MEMORY_SERVER_URL}" | grep -qE '^https?://(127\.|localhost|\[?::1\]?)'; then
     echo
     echo "→ Note: AI_MEMORY_SERVER_URL points at ${AI_MEMORY_SERVER_URL}"
-    echo "  Your local image is now up to date, but the remote server still"
-    echo "  runs the previous version. Redeploy on that host (e.g. \`bin/deploy\`"
-    echo "  or \`docker compose pull && docker compose up -d\` in its deploy dir)"
-    echo "  for the server-side binary to update."
+    echo "  ai-memory upgrade updates this wrapper and local image only; it does not"
+    echo "  inspect or redeploy the remote server. If that host is not already current,"
+    echo "  run \`bin/deploy\` or \`docker compose pull && docker compose up -d\`"
+    echo "  in its deploy directory."
   fi
 
   mkdir -p "${CACHE_DIR}"

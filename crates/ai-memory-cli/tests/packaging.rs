@@ -278,6 +278,44 @@ fn managed_run_wrapper_uses_host_binary_path_and_remote_server_without_docker() 
 
 #[cfg(unix)]
 #[test]
+fn wrapper_upgrade_does_not_claim_an_updated_remote_server_is_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let docker = tmp.path().join("docker");
+    std::fs::write(
+        &docker,
+        "#!/usr/bin/env bash\n\
+         case \"$1\" in\n\
+           pull | ps) exit 0 ;;\n\
+           *) exit 1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = shell_script_command(&repo_root().join("bin/ai-memory"))
+        .arg("upgrade")
+        .env("AI_MEMORY_DOCKER", &docker)
+        .env("AI_MEMORY_SKIP_SELF_UPGRADE", "1")
+        .env("AI_MEMORY_SERVER_URL", "http://192.168.0.90:49374")
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("does not\n  inspect or redeploy the remote server"));
+    assert!(stdout.contains("If that host is not already current"));
+    assert!(!stdout.contains("remote server still\n  runs the previous version"));
+}
+
+#[cfg(unix)]
+#[test]
 fn docker_wrapper_completions_tolerate_an_early_reader_close() {
     let tmp = tempfile::tempdir().unwrap();
     let docker = tmp.path().join("docker");

@@ -401,8 +401,13 @@ Upgrading the binary is sufficient for native Claude Code installs, and pending
 spooled events drain with the field stripped as well. Installs that run the
 `.sh`/`.ps1` script fallback (the Docker script bundle or an explicit
 `AI_MEMORY_HOOK_PLATFORM=posix`) still POST the raw field on the local wire
-until they move to native commands: run `install-hooks --agent claude-code
---apply`, which installs native `ai-memory hook` commands where supported.
+until they move to native commands. The Docker wrapper deliberately keeps
+script commands because a binary path inside its helper container is not valid
+on the host; running `install-hooks` through that wrapper refreshes the scripts
+but does not convert them. To close the local-wire exposure, install a native
+ai-memory client on the agent host, then use that native executable to run
+`install-hooks --agent claude-code --apply`. If the script fallback is retained,
+the server still strips the field immediately on receipt before persistence.
 
 Native `ai-memory hook --event ...` commands spool events locally. Session start
 does a short bounded cleanup drain before fetching a handoff; cancellation-prone
