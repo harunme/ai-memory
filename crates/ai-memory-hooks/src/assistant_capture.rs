@@ -196,8 +196,8 @@ pub fn apply_assistant_backstop(env: &mut HookEnvelope, server_enabled: bool) {
 /// This is a defense applied on BOTH sides of the wire (client pre-spool and
 /// server pre-envelope) and for EVERY agent/event, not just the supported pair:
 /// a raw assistant-message field must never reach the spool, the wire, tracing,
-/// or storage unless the explicit opt-in path (later PR) re-introduces it as a
-/// sanitized, capped excerpt. Only top-level keys are inspected — the same scope
+/// or storage unless the explicit opt-in path re-introduces it as a sanitized,
+/// capped excerpt. Only top-level keys are inspected — the same scope
 /// as `body_is_subagent`, and where every supported harness places the field.
 pub fn strip_assistant_message_raw(raw: &mut serde_json::Value) -> bool {
     let Some(object) = raw.as_object_mut() else {

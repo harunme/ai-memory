@@ -401,8 +401,9 @@ the local spool or the wire, and the server strips it defensively on arrival.
 excerpt of the assistant's final turn as the Stop body. It is a **double
 opt-in** — enable the server first, then the client:
 
-1. **Server:** set `capture_assistant = true` in `config.default.toml` (or
-   `AI_MEMORY_CAPTURE_ASSISTANT=true`) and restart `ai-memory serve`.
+1. **Server:** set `capture_assistant = true` in the live
+   `<data_dir>/config.toml` (or the service's configured TOML file), or set
+   `AI_MEMORY_CAPTURE_ASSISTANT=true`, then restart `ai-memory serve`.
 2. **Client:** re-install the Claude Code hooks with the flag:
 
    ```bash
