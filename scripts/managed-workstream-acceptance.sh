@@ -8,7 +8,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN=${AI_MEMORY_ACCEPTANCE_BIN:-"$ROOT/target/debug/ai-memory"}
 KEEP=${AI_MEMORY_ACCEPTANCE_KEEP:-0}
 DETERMINISTIC_ONLY=${AI_MEMORY_ACCEPTANCE_DETERMINISTIC_ONLY:-0}
-HARNESS_WORDS=${AI_MEMORY_ACCEPTANCE_HARNESSES:-"claude codex opencode pi crush omp"}
+HARNESS_WORDS=${AI_MEMORY_ACCEPTANCE_HARNESSES:-"claude codex opencode pi crush omp kimi"}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ai-memory-workstream-acceptance.XXXXXX")
 DATA="$TMP/data"
 REPO="$TMP/repo"
@@ -106,6 +106,38 @@ case "${AI_MEMORY_ACCEPTANCE_FAKE_MODE:-argv}" in
     cp "$CRUSH_GLOBAL_CONFIG/crush.json" "$AI_MEMORY_ACCEPTANCE_CRUSH_CONFIG_LOG"
     packet=$(jq -r '.options.global_context_paths[-1]' "$CRUSH_GLOBAL_CONFIG/crush.json")
     cp "$packet" "$AI_MEMORY_ACCEPTANCE_CRUSH_PACKET_LOG"
+    ;;
+  kimi)
+    printf '%s\n' "$@" >"$AI_MEMORY_ACCEPTANCE_ARGV_LOG"
+    # Honor `--session <id>` (resume); a fresh launch mints its own id
+    # because Kimi Code cannot accept a caller-supplied session id.
+    session_id=""
+    previous_arg=""
+    for arg in "$@"; do
+      if [ "$previous_arg" = --session ]; then
+        session_id=$arg
+      fi
+      previous_arg=$arg
+    done
+    if [ -z "$session_id" ]; then
+      session_id="session_acceptance-$(date +%s)-$$"
+    fi
+    # The bucket directory name is intentionally opaque: the real layout
+    # hashes the working directory one-way, and discovery must read
+    # state.json's workDir instead of parsing the bucket name.
+    session_dir="${KIMI_CODE_HOME:?kimi fake mode requires KIMI_CODE_HOME}/sessions/wd_fixture_bucket/$session_id"
+    mkdir -p "$session_dir/agents/main"
+    wire="$session_dir/agents/main/wire.jsonl"
+    if [ ! -f "$session_dir/state.json" ]; then
+      printf '{"workDir":"%s"}\n' "$PWD" >"$session_dir/state.json"
+      printf '{"type":"metadata","protocol_version":"1","created_at":%s}\n' \
+        "$(date +%s)000" >"$wire"
+    fi
+    sentinel=${AI_MEMORY_ACCEPTANCE_SENTINEL:-AMWS-FAKE-KIMI}
+    printf '{"type":"context.append_message","time":%s,"message":{"role":"user","content":[{"type":"text","text":"%s"}],"toolCalls":[]}}\n' \
+      "$(date +%s)000" "$sentinel" >>"$wire"
+    printf '{"type":"context.append_message","time":%s,"message":{"role":"assistant","content":[{"type":"text","text":"%s reply"}],"toolCalls":[]}}\n' \
+      "$(date +%s)000" "$sentinel" >>"$wire"
     ;;
 esac
 EOF
@@ -207,7 +239,9 @@ set -e
   printf 'bare run unexpectedly started without a checkout-local session\n' >&2
   exit 1
 }
-grep -q 'no Claude Code, Codex, OpenCode, Pi, or Crush session' \
+# The harness list in this message grows as adapters join the automatic
+# pool (Kimi joined after Crush), so match the stable tail instead.
+grep -q 'session was found for this directory' \
   "$LOGS/edge-auto-empty.log"
 
 # On a new workstream, bare run automatically adopts the newest local session.
@@ -308,6 +342,71 @@ crush_context_dir=$(cat "$TMP/crush-context-env.log")
   exit 1
 }
 
+# Kimi fake-mode fixture: the fake kimi honors `--session <id>`, writes the
+# native store layout ($KIMI_CODE_HOME/sessions/<bucket>/<id>/state.json plus
+# agents/main/wire.jsonl), and appends the round sentinel as
+# context.append_message records. A fresh launch injects no selector because
+# Kimi Code cannot mint a caller-supplied session id; the wrapper links the
+# session post-exit by exact-checkout discovery through state.json.
+KIMI_FAKE_HOME="$CONFIG/kimi-fake"
+mkdir -p "$KIMI_FAKE_HOME"
+(
+  cd "$REPO"
+  KIMI_CODE_HOME="$KIMI_FAKE_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=kimi \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/kimi-first-argv.log" \
+  AI_MEMORY_ACCEPTANCE_SENTINEL="AMWS-FAKE-KIMI-ONE" \
+    "$BIN" --data-dir "$DATA" run --new edge-kimi --executable "$FAKE" \
+      kimi >"$LOGS/edge-kimi-first.log" 2>&1
+)
+[ ! -s "$TMP/kimi-first-argv.log" ] || {
+  printf 'fresh kimi launch unexpectedly received a session selector\n' >&2
+  cat "$TMP/kimi-first-argv.log" >&2
+  exit 1
+}
+kimi_session_dir=$(find "$KIMI_FAKE_HOME/sessions" -mindepth 2 -maxdepth 2 -type d -print -quit)
+[ -n "$kimi_session_dir" ] || {
+  printf 'fake kimi did not create a native session store\n' >&2
+  exit 1
+}
+kimi_session_id=$(basename "$kimi_session_dir")
+kimi_ws_hex=$(sqlite3 "$DATA/db/memory.sqlite" \
+  "SELECT lower(hex(id)) FROM workstreams WHERE name = 'edge-kimi' ORDER BY selected_at DESC LIMIT 1;")
+[ "${#kimi_ws_hex}" -eq 32 ] || {
+  printf 'could not resolve the edge-kimi workstream id\n' >&2
+  exit 1
+}
+kimi_ws_id="${kimi_ws_hex:0:8}-${kimi_ws_hex:8:4}-${kimi_ws_hex:12:4}-${kimi_ws_hex:16:4}-${kimi_ws_hex:20:12}"
+kimi_first_hits=$("$BIN" --data-dir "$DATA" workstream-search \
+  --workstream-id "$kimi_ws_id" --limit 100 --json "AMWS-FAKE-KIMI-ONE")
+jq -e --arg id "$kimi_session_id" \
+  '[.[] | select(.agent == "kimi-code" and .role == "assistant" and (.content | contains("AMWS-FAKE-KIMI-ONE")) and .native_session_id == $id)] | length == 1' \
+  <<<"$kimi_first_hits" >/dev/null || {
+  printf 'kimi wire.jsonl sentinel was not imported from the discovered session\n' >&2
+  tail -80 "$LOGS/edge-kimi-first.log" >&2
+  exit 1
+}
+(
+  cd "$REPO"
+  KIMI_CODE_HOME="$KIMI_FAKE_HOME" \
+  AI_MEMORY_ACCEPTANCE_FAKE_MODE=kimi \
+  AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/kimi-second-argv.log" \
+  AI_MEMORY_ACCEPTANCE_SENTINEL="AMWS-FAKE-KIMI-TWO" \
+    "$BIN" --data-dir "$DATA" run --workstream edge-kimi --executable "$FAKE" \
+      kimi >"$LOGS/edge-kimi-second.log" 2>&1
+)
+diff -u <(printf '%s\n' --session "$kimi_session_id") "$TMP/kimi-second-argv.log"
+kimi_second_hits=$("$BIN" --data-dir "$DATA" workstream-search \
+  --workstream-id "$kimi_ws_id" --limit 100 --json "AMWS-FAKE-KIMI")
+jq -e \
+  '([.[] | select(.role == "assistant" and (.content | contains("AMWS-FAKE-KIMI-ONE")))] | length == 1)
+   and ([.[] | select(.role == "assistant" and (.content | contains("AMWS-FAKE-KIMI-TWO")))] | length == 1)' \
+  <<<"$kimi_second_hits" >/dev/null || {
+  printf 'kimi incremental import duplicated or missed a round sentinel\n' >&2
+  tail -80 "$LOGS/edge-kimi-second.log" >&2
+  exit 1
+}
+
 # A blank first launch remains eligible for one-time native-session adoption.
 # Use a pseudo-terminal because redirected/scripted launches deliberately skip
 # the chooser.
@@ -402,10 +501,11 @@ PI_EXTENSION="$CONFIG/pi/ai-memory.ts"
 OMP_EXTENSION="$CONFIG/omp/ai-memory.ts"
 OMP_AGENT_DIR="$CONFIG/omp/agent"
 CRUSH_DATA_DIR="$CONFIG/crush/data"
+KIMI_ACCEPTANCE_HOME="$CONFIG/kimi-home"
 mkdir -p "$(dirname "$CLAUDE_SETTINGS")" "$(dirname "$CODEX_HOOKS")" \
   "$(dirname "$OPENCODE_PLUGIN")" "$(dirname "$PI_EXTENSION")" \
   "$(dirname "$OMP_EXTENSION")" "$OMP_AGENT_DIR" "$OPENCODE_DATA_HOME/opencode" \
-  "$CRUSH_DATA_DIR"
+  "$CRUSH_DATA_DIR" "$KIMI_ACCEPTANCE_HOME"
 
 # Redirect native transcript stores into the fixture while reusing only the
 # minimum authentication material required for real model calls.
@@ -445,6 +545,14 @@ for config_name in opencode.json opencode.jsonc tui.json; do
   fi
 done
 
+# Kimi Code keeps providers/model and hooks in one config.toml under
+# $KIMI_CODE_HOME. Seed the isolated home with the operator's provider
+# settings; install-hooks merges its [[hooks]] entries without rewriting
+# the rest of the file.
+if [ -f "$HOME/.kimi-code/config.toml" ]; then
+  cp "$HOME/.kimi-code/config.toml" "$KIMI_ACCEPTANCE_HOME/config.toml"
+fi
+
 install_hook() {
   local agent=$1
   local target=$2
@@ -454,7 +562,7 @@ install_hook() {
     --config-file "$target"
   )
   case "$agent" in
-    claude-code | codex)
+    claude-code | codex | kimi-code)
       command+=(--hooks-dir "$ROOT/hooks")
       ;;
   esac
@@ -467,6 +575,7 @@ install_hook codex "$CODEX_HOOKS"
 install_hook opencode "$OPENCODE_PLUGIN"
 install_hook pi "$PI_EXTENSION"
 install_hook omp "$OMP_EXTENSION"
+install_hook kimi-code "$KIMI_ACCEPTANCE_HOME/config.toml"
 
 uuid_from_hex() {
   local hex=$1
@@ -487,6 +596,7 @@ agent_wire_name() {
   case "$1" in
     claude) printf 'claude-code\n' ;;
     opencode) printf 'open-code\n' ;;
+    kimi) printf 'kimi-code\n' ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -541,6 +651,10 @@ run_harness() {
       native_args=(-p --no-tools --extension "$OMP_EXTENSION" --session-dir "$CONFIG/omp/sessions" "$prompt")
       [ -z "${AI_MEMORY_ACCEPTANCE_OMP_MODEL:-}" ] || native_args=(-p --no-tools --extension "$OMP_EXTENSION" --session-dir "$CONFIG/omp/sessions" --model "$AI_MEMORY_ACCEPTANCE_OMP_MODEL" "$prompt")
       ;;
+    kimi)
+      native_args=(-p "$prompt")
+      [ -z "${AI_MEMORY_ACCEPTANCE_KIMI_MODEL:-}" ] || native_args=(-p -m "$AI_MEMORY_ACCEPTANCE_KIMI_MODEL" "$prompt")
+      ;;
     *)
       printf 'unsupported acceptance harness: %s\n' "$harness" >&2
       return 1
@@ -564,6 +678,10 @@ run_harness() {
       >"$log" 2>&1
   elif [ "$harness" = omp ]; then
     (cd "$REPO" && PI_CODING_AGENT_DIR="$OMP_AGENT_DIR" \
+      "$BIN" --data-dir "$DATA" run "${wrapper_args[@]}" "$harness" "${native_args[@]}") \
+      >"$log" 2>&1
+  elif [ "$harness" = kimi ]; then
+    (cd "$REPO" && KIMI_CODE_HOME="$KIMI_ACCEPTANCE_HOME" \
       "$BIN" --data-dir "$DATA" run "${wrapper_args[@]}" "$harness" "${native_args[@]}") \
       >"$log" 2>&1
   else
