@@ -8,15 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Hook ingest is now idempotent across delivery retries. Every event mints a
-  UUID `ingest_key` once when it is spooled, baked into the entry's URL so
-  each retry re-sends the same key; the server claims the key in the same
-  store transaction as the observation row and skips a replayed event whose
-  previous delivery succeeded but whose response was lost — the conservative
-  retry no longer duplicates observations or session-end auto-handoffs.
-  Compatible in both directions (older servers ignore the parameter, older
-  clients keep at-least-once delivery); keys expire opportunistically after
-  30 days without a scheduler job.
 - The store writer only accepts `Sanitized<NewObservation>`: the privacy
   strip is enforced by the type system at the persistence boundary, so an
   unsanitized observation cannot reach disk by construction.
