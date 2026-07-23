@@ -1808,7 +1808,9 @@ Every proposal must include bounded evidence quotes, confidence, rationale, and 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_memory_core::{AgentKind, NewObservation, NewSession, ObservationId, ObservationKind};
+    use ai_memory_core::{
+        AgentKind, NewObservation, NewSession, ObservationId, ObservationKind, Sanitized, Sanitizer,
+    };
     use ai_memory_llm::{ChatResponse, LlmResult};
     use ai_memory_store::Store;
     use jiff::Timestamp;
@@ -2207,21 +2209,24 @@ mod tests {
         for i in 0..3 {
             store
                 .writer
-                .insert_observation(NewObservation {
-                    session_id,
-                    workspace_id: ws,
-                    project_id: proj,
-                    kind: if i == 0 {
-                        ObservationKind::SessionStart
-                    } else {
-                        ObservationKind::UserPrompt
+                .insert_observation(Sanitized::new(
+                    NewObservation {
+                        session_id,
+                        workspace_id: ws,
+                        project_id: proj,
+                        kind: if i == 0 {
+                            ObservationKind::SessionStart
+                        } else {
+                            ObservationKind::UserPrompt
+                        },
+                        extension: None,
+                        source_event: None,
+                        title: format!("event {i}"),
+                        body: "run the full gate before release".into(),
+                        importance: 5,
                     },
-                    extension: None,
-                    source_event: None,
-                    title: format!("event {i}"),
-                    body: "run the full gate before release".into(),
-                    importance: 5,
-                })
+                    &Sanitizer::builtin(),
+                ))
                 .await
                 .unwrap();
         }

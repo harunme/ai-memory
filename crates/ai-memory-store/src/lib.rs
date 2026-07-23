@@ -120,8 +120,8 @@ mod tests {
     use super::*;
     use ai_memory_core::{
         ActorContext, AgentKind, LinkTarget, NewObservation, NewPage, NewSession,
-        NewWorkstreamEvent, ObservationId, ObservationKind, PageId, PagePath, ProjectId, SessionId,
-        Tier, UserId, WorkspaceId, WorkstreamEventKind,
+        NewWorkstreamEvent, ObservationId, ObservationKind, PageId, PagePath, ProjectId, Sanitized,
+        Sanitizer, SessionId, Tier, UserId, WorkspaceId, WorkstreamEventKind,
     };
     use rusqlite::{Connection, params};
     use sha2::{Digest, Sha256};
@@ -2319,17 +2319,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: proj,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "prompt".into(),
-                body: "the raw-only zebra detail lives here".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "prompt".into(),
+                    body: "the raw-only zebra detail lives here".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
 
@@ -2341,6 +2344,71 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, session_id);
         assert!(hits[0].snippet.contains("<mark>zebra</mark>"));
+    }
+
+    /// The public writer API only accepts `Sanitized<NewObservation>`, and
+    /// `Sanitized::new` is the single constructor — so a secret passed in an
+    /// observation body cannot reach disk unscrubbed. This locks the typed
+    /// boundary end-to-end: through the writer, into the SQLite `body` column.
+    #[tokio::test]
+    async fn insert_observation_boundary_scrubs_before_disk() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let session_id = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                id: session_id,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        store
+            .writer
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "Authorization: Bearer abcdef0123456789ABCDEF0123456789".into(),
+                    body: "leaked Authorization: Bearer abcdef0123456789ABCDEF0123456789 in transcript"
+                        .into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
+            .await
+            .unwrap();
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let (title, body): (String, String) = conn
+            .query_row("SELECT title, body FROM observations", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        for col in [&title, &body] {
+            assert!(col.contains("[REDACTED]"), "expected scrub in: {col}");
+            assert!(
+                !col.contains("abcdef0123"),
+                "secret reached disk unscrubbed: {col}"
+            );
+        }
     }
 
     #[tokio::test]

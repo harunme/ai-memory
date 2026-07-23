@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 
 use ai_memory_core::{
     AgentKind, HandoffId, ManagedRunId, NewHandoff, NewObservation, NewPage, NewSession, NewUser,
-    ObservationId, PageId, PagePath, ProjectId, SessionId, UserId, WorkspaceId,
+    ObservationId, PageId, PagePath, ProjectId, Sanitized, SessionId, UserId, WorkspaceId,
 };
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
@@ -473,9 +473,18 @@ impl WriterHandle {
 
     /// Append an observation row.
     ///
+    /// Takes [`Sanitized<NewObservation>`] — the privacy strip is enforced by
+    /// the type system at the store boundary, so an unsanitized observation
+    /// cannot reach disk by construction ([`Sanitized::new`] is the single
+    /// constructor and applies the scrub).
+    ///
     /// # Errors
     /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
-    pub async fn insert_observation(&self, obs: NewObservation) -> StoreResult<ObservationId> {
+    pub async fn insert_observation(
+        &self,
+        obs: Sanitized<NewObservation>,
+    ) -> StoreResult<ObservationId> {
+        let obs = obs.into_inner();
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::InsertObservation { obs, reply: tx })
             .await?;

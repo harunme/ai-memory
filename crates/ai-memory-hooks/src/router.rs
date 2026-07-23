@@ -1987,11 +1987,12 @@ async fn process(
         body,
         importance: importance_for(env.event),
     };
+    // The store boundary takes `Sanitized<NewObservation>` directly — no
+    // unwrap-and-clone; the type proves the scrub happened. The log line
+    // below wants the scrubbed title, so keep a copy before the move.
     let sanitized = Sanitized::new(raw_obs, &state.sanitizer);
-    let _ = state
-        .writer
-        .insert_observation(sanitized.inner().clone())
-        .await?;
+    let log_title = sanitized.inner().title.clone();
+    let _ = state.writer.insert_observation(sanitized).await?;
 
     // Append the log line to the per-project log.md.
     if let Err(e) = log::append_event(
@@ -2000,7 +2001,7 @@ async fn process(
         proj,
         Timestamp::now(),
         env.event,
-        sanitized.inner().title.as_str(),
+        log_title.as_str(),
     ) {
         warn!(error = %e, "log.md append failed");
     }
