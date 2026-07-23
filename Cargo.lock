@@ -286,6 +286,7 @@ version = "1.17.3"
 dependencies = [
  "ai-memory-core",
  "anyhow",
+ "jiff",
  "rusqlite",
  "serde",
  "serde_json",
