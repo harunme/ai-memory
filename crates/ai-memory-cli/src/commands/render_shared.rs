@@ -1024,7 +1024,13 @@ fn hook_command(
             format!("{prefix}{}", shell_quote(&script.to_string_lossy()))
         }
         HookCommandPlatform::Windows => {
-            let mut setup = format!("$env:AI_MEMORY_HOOK_URL={}", powershell_quote(server_url));
+            // Hook runners launch this child with redirected streams. Force
+            // text transport and suppress non-interactive progress so Windows
+            // PowerShell does not serialize progress records as CLIXML.
+            let mut setup = format!(
+                "$ProgressPreference='SilentlyContinue'; $env:AI_MEMORY_HOOK_URL={}",
+                powershell_quote(server_url)
+            );
             if let Some(t) = auth_token {
                 setup.push_str(&format!(
                     "; $env:AI_MEMORY_AUTH_TOKEN={}",
@@ -1040,7 +1046,7 @@ fn hook_command(
             let program = format!("{setup}; & {}", powershell_quote(&script.to_string_lossy()));
             let encoded = powershell_encoded_command(&program);
             format!(
-                "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -InputFormat Text -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand {encoded}"
             )
         }
         HookCommandPlatform::WindowsBash => {
@@ -2144,7 +2150,7 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
             .and_then(|s| s.as_str())
             .unwrap();
         assert!(cmd.starts_with(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -InputFormat Text -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand "
         ));
         assert!(
             !cmd.contains("$env:"),
@@ -2155,6 +2161,7 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
             "outer command must not expose values to its caller: {cmd}"
         );
         let program = decode_powershell_encoded_command(cmd);
+        assert!(program.starts_with("$ProgressPreference='SilentlyContinue';"));
         assert!(program.contains("$env:AI_MEMORY_HOOK_URL='http://localhost:49374'"));
         assert!(program.contains("$env:AI_MEMORY_AUTH_TOKEN='tok''en'"));
         assert!(
@@ -2190,6 +2197,10 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
                 "{pointer}: {command}"
             );
             assert!(
+                command.contains(" -InputFormat Text -OutputFormat Text "),
+                "{pointer}: nested PowerShell transport must stay textual: {command}"
+            );
+            assert!(
                 !command.contains("$env:")
                     && !command.contains("localhost:49374")
                     && !command.contains(".ps1"),
@@ -2197,6 +2208,10 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
             );
 
             let program = decode_powershell_encoded_command(command);
+            assert!(
+                program.starts_with("$ProgressPreference='SilentlyContinue';"),
+                "{pointer}: {program}"
+            );
             assert!(
                 program.contains("$env:AI_MEMORY_HOOK_URL='http://localhost:49374'"),
                 "{pointer}: {program}"
@@ -2222,6 +2237,7 @@ check(activeKeep.disposition === "keep" && activeKeep.protocol?.version === 1 &&
             &script,
             r#"if ($env:AI_MEMORY_HOOK_URL -ne "http://localhost:49374") { exit 9 }
 if ($env:AI_MEMORY_AUTH_TOKEN -ne "tok'en") { exit 10 }
+Write-Progress -Activity "hook progress" -Status "must stay silent"
 $payload = [Console]::In.ReadToEnd()
 [Console]::Out.Write($payload)
 "#,
@@ -2257,6 +2273,11 @@ $payload = [Console]::In.ReadToEnd()
         assert!(
             output.status.success(),
             "nested PowerShell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "non-interactive hook wrote stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(output.stdout, br#"{"hook":"ok"}"#);

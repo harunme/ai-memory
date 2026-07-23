@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Code's `--yolo`, and kimi joins the automatic bare-run harness pool.
 
 ### Fixed
+- Windows PowerShell fallback hooks now force text input/output and silence
+  non-interactive progress records. This prevents nested PowerShell runners
+  such as Antigravity CLI from reporting serialized `CLIXML` progress on every
+  hook while preserving the hook's JSON stdout. Existing script-fallback
+  installs should rerun `install-hooks --agent <agent> --apply` after upgrading
+  ([#224]).
 - Kimi Code handoffs are now delivered through the `UserPromptSubmit` hook
   instead of `SessionStart`. Kimi Code fires `SessionStart` but discards the
   hook's stdout/result (verified against kimi-code v0.28.1,

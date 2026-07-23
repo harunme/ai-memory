@@ -414,7 +414,9 @@ The rendered hooks config looks like:
 - Hook scripts are staged under `~/.local/share/ai-memory/hooks/antigravity-cli/`.
 - Native Windows Docker-wrapper installs render hook entries as
   `powershell.exe ... -EncodedCommand <payload>` so Antigravity's outer command
-  runner cannot expand the inner `$env:` setup. Rerun
+  runner cannot expand the inner `$env:` setup. The child also forces text
+  input/output and disables progress so PowerShell does not serialize progress
+  records as `CLIXML` hook stderr. Rerun
   `install-hooks --agent antigravity-cli --apply` after upgrading to refresh
   existing entries.
 - The `PreInvocation` event fires before each model call (not just at
@@ -424,6 +426,9 @@ The rendered hooks config looks like:
 - Antigravity CLI does not expose a true session-end hook. `Stop` records
   a stop observation only; call `memory_handoff_begin` before quitting when
   you need the next agent to receive a handoff.
+- The built-in `/web` route displays compiled wiki pages, not raw session or
+  observation rows. To verify hook capture, compare the `sessions` and
+  `observations` counts from `ai-memory status` before and after a prompt.
 - Source: <https://antigravity.google/docs/hooks>
 
 ---
