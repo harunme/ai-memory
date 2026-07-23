@@ -1772,6 +1772,8 @@ mod tests {
 
     struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
 
+    static WARNING_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
     impl Write for CapturedLogWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(buf);
@@ -1792,6 +1794,7 @@ mod tests {
     }
 
     fn capture_warnings(run: impl FnOnce()) -> String {
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap();
         let logs = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::WARN)
