@@ -283,10 +283,11 @@ Top-line rules carved into the codebase:
 ## 15. Managed workstreams use a portable ledger, not native format conversion
 
 Managed cross-harness continuity is explicitly opt-in through `ai-memory run`.
-Direct Claude Code, Codex, OpenCode, Pi, Crush, and OMP launches retain the
-existing hook and single-use handoff behavior. There is no process-global mode
-or manual harness switch: the wrapper selects the current repository/worktree
-workstream and each adapter applies that harness's native create/resume syntax.
+Direct Claude Code, Codex, OpenCode, Pi, Crush, Kimi Code, and OMP launches
+retain the existing hook and single-use handoff behavior. There is no
+process-global mode or manual harness switch: the wrapper selects the current
+repository/worktree workstream and each adapter applies that harness's native
+create/resume syntax.
 
 One logical workstream owns one native session per harness plus an append-only
 portable event ledger. We rejected converting a Claude transcript into a fake

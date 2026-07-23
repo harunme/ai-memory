@@ -67,11 +67,11 @@ priors are at the [bottom](#influences-and-prior-art).
   codex --yolo`, transparently resumes one logical workstream with native
   per-harness sessions, a portable visible-event ledger, and full-ledger search.
   `ai-memory run` with no harness continues the newest usable Claude Code,
-  Codex, OpenCode, Pi, or Crush session for this checkout. On first explicit use,
-  an interactive launcher can adopt a previous session from the same checkout;
-  later switches cannot select unrelated native history. Native arguments pass
-  through unchanged except the wrapper-owned `--yolo`; direct commands are
-  unaffected.
+  Codex, OpenCode, Pi, Crush, or Kimi Code session for this checkout. On first
+  explicit use, an interactive launcher can adopt a previous session from the
+  same checkout; later switches cannot select unrelated native history. Native
+  arguments pass through unchanged except the wrapper-owned `--yolo`; direct
+  commands are unaffected.
 - **Per-repository capture exclusions.** A nearest-marker `[capture]`
   `ignore_paths` policy drops matching recognized file-tool events before they
   reach the local spool or server. See [the capture policy reference](docs/marker-file.md#capture-exclusions).
@@ -153,8 +153,8 @@ priors are at the [bottom](#influences-and-prior-art).
   newer cross-harness history. After a normal quit, the next launch waits
   briefly if the previous launcher is still finalizing; handled failures release
   the workstream immediately. Managed mode currently covers Claude Code, Codex,
-  OpenCode, Pi, Crush, and OMP; direct harness launches remain unchanged. See
-  [Managed cross-harness workstreams](docs/managed-workstreams.md).
+  OpenCode, Pi, Crush, Kimi Code, and OMP; direct harness launches remain
+  unchanged. See [Managed cross-harness workstreams](docs/managed-workstreams.md).
 - **"Quit at 4 PM, pick up at 9 AM in a different agent."** The
   classic. SessionStart hook in the next supported hook client prepends a
   typed handoff with open questions, next steps, and a session summary. Grok
@@ -704,7 +704,7 @@ diagram, crate breakdown, schema notes, and invariants.
 |---|---|
 | [`docs/install.md`](docs/install.md) | **Installation cookbook.** Every agent CLI, every alternative (curl, source build, no-docker, no-auth), and the server-on-a-different-machine (homelab/LAN) walkthrough. Read after the Quick start if your setup doesn't match the happy path. |
 | [`docs/usage.md`](docs/usage.md) | Handoffs, proactive memory queries, slim routing snippet + managed Agent Skills, migration from other memory tools, web UI, raw-wiki inspection, and rules-vs-facts workflow. |
-| [`docs/managed-workstreams.md`](docs/managed-workstreams.md) | Optional `ai-memory run` continuity across Claude Code, Codex, OpenCode, Pi, Crush, and OMP: automatic harness selection, native resume, argument forwarding, ledger search, privacy, and recovery. |
+| [`docs/managed-workstreams.md`](docs/managed-workstreams.md) | Optional `ai-memory run` continuity across Claude Code, Codex, OpenCode, Pi, Crush, Kimi Code, and OMP: automatic harness selection, native resume, argument forwarding, ledger search, privacy, and recovery. |
 | [`docs/managed-harness-contributions.md`](docs/managed-harness-contributions.md) | Protocol and acceptance bar for contributors adding managed resume, read-only transcript import, and startup context delivery to another harness. |
 | [`docs/marker-file.md`](docs/marker-file.md) | `.ai-memory.toml` workspace/project routing for multi-client trees, mono-repos, worktrees, and work/personal separation. |
 | [`docs/auto-scope.md`](docs/auto-scope.md) | `[auto_scope]` modes for shared servers: default single-slot routing, session-aware isolation, and multi-user `per_actor` behavior. |
