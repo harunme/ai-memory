@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The session-review sampler now scores a non-empty `Stop` observation just
   below `PreCompact` (88 vs 90) instead of the low `55` prior, so the opt-in
   assistant/Stop excerpt (a late summary or correction) competes for a sampling
-  slot without evicting user prompts. An empty `Stop` keeps its low prior. The
-  reviewer still sees only the first 1500 characters of any observation body, so
-  a correction inside a long excerpt must fall in that window ([#196]).
+  slot while keeping the `UserPrompt` base priority higher. An empty `Stop`
+  keeps its low prior. The reviewer still sees only the first 1500 characters
+  of any observation body, so a correction inside a long excerpt must fall in
+  that window ([#196]).
 - Opt-in assistant/Stop capture for Claude Code (#196). When BOTH the server
   (`capture_assistant = true` / `AI_MEMORY_CAPTURE_ASSISTANT=true`) and the
   client (`install-hooks --agent claude-code --capture-assistant`) opt in, a

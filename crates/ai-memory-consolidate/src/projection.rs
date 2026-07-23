@@ -650,12 +650,11 @@ mod tests {
         assert!(projected.text.contains("observations omitted"));
     }
 
-    /// Lock the exact reviewer ordering for the opt-in Stop excerpt (#196, D4):
+    /// Lock the base reviewer ordering for the opt-in Stop excerpt (#196):
     /// a non-empty Stop scores below PreCompact (no tie — ties resolve by
-    /// position), above PostCompaction, well above an empty Stop, and never
-    /// outranks a UserPrompt (so a busy multi-turn session cannot let Stops
-    /// crowd prompts out). Same idx/total/importance so only the kind term (and
-    /// body-emptiness) differ — neutral text avoids the high-signal/anchor bonuses.
+    /// position), above PostCompaction, well above an empty Stop, and below a
+    /// UserPrompt. Same idx/total/importance means only the kind term (and body
+    /// emptiness) differs; neutral text avoids high-signal and anchor bonuses.
     #[test]
     fn non_empty_stop_score_sits_below_precompact_above_postcompaction() {
         let idx = 50;
@@ -680,7 +679,7 @@ mod tests {
         assert_eq!(stop_full, stop_empty + 33, "non-empty must beat empty Stop");
         assert!(
             user_prompt > stop_full,
-            "a Stop must never outrank a prompt"
+            "the UserPrompt base priority must remain higher"
         );
     }
 
@@ -714,10 +713,11 @@ mod tests {
         );
     }
 
-    /// The Stop=88 bump must not create a herd that evicts UserPrompts (100): in a
-    /// busy multi-turn session, every prompt AND every non-empty Stop is selected.
+    /// A sampled multi-turn session retains representative prompts and
+    /// non-empty Stops together. This is not a claim that every prompt fits in
+    /// every bounded projection.
     #[test]
-    fn non_empty_stops_do_not_evict_user_prompts() {
+    fn sampled_session_retains_prompts_and_non_empty_stops() {
         let mut observations: Vec<_> = (0..60)
             .map(|idx| obs(idx, ObservationKind::PostToolUse, "routine", "x", 1))
             .collect();
@@ -735,7 +735,7 @@ mod tests {
         for i in prompts {
             assert!(
                 projected.selected_indices.contains(&i),
-                "UserPrompt at {i} was evicted: {:?}",
+                "expected UserPrompt at {i} to be selected: {:?}",
                 projected.selected_indices
             );
         }
