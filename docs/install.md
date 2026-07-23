@@ -637,8 +637,12 @@ native `ai-memory hook --event … --agent kimi-code` commands on local installs
 (local spool plus batched delivery, capture-policy v1 enforced); the staged
 script bundle under `~/.local/share/ai-memory/hooks/kimi-code/` is the
 compatibility fallback (fire-and-forget POSTs to `/hook`). A pending handoff
-is injected at `SessionStart` through the hook's stdout, which Kimi Code
-appends to the model context.
+is injected at `UserPromptSubmit` through the hook's stdout, which Kimi Code
+appends to the model context as a user message before the turn; Kimi Code
+fires `SessionStart` but discards that hook's stdout, so hooks installed by
+an older release consumed handoffs without delivering them. Re-run
+`ai-memory install-hooks --agent kimi-code --apply` after upgrading to pick
+up the corrected delivery path (required for `ai-memory run kimi`).
 
 Kimi Code hook entries accept only `event`, `matcher`, `command`, and
 `timeout`; extra fields make the whole `config.toml` fail to load, so prefer

@@ -1,7 +1,8 @@
 # Managed cross-harness workstreams
 
 `ai-memory run` is an opt-in launcher that lets one logical coding session move
-between Claude Code, Codex, OpenCode, Pi, Crush, and OMP. Direct agent launches
+between Claude Code, Codex, OpenCode, Pi, Crush, Kimi Code, and OMP. Direct
+agent launches
 keep their existing ai-memory behavior. There is no global mode toggle and no
 `switch` command: using `run` selects the current workstream and transparently
 creates or resumes the correct native session for the requested harness.
@@ -25,7 +26,7 @@ second copy of each harness's option schema. Other wrapper options come first:
 ```text
 ai-memory run [--workspace NAME] [--project NAME]
               [--workstream NAME | --new NAME] [--executable PATH] [--yolo]
-              [claude|codex|opencode|pi|crush|omp] [native arguments...]
+              [claude|codex|opencode|pi|crush|omp|kimi] [native arguments...]
 ```
 
 The default is the most recently selected workstream for the current repository
@@ -36,7 +37,8 @@ branching controls, not harness-switch controls.
 ## Automatic harness selection
 
 With no harness name, `ai-memory run` inspects checkout-local sessions for
-Claude Code, Codex, OpenCode, Pi, and Crush. For an empty workstream it resumes
+Claude Code, Codex, OpenCode, Pi, Crush, and Kimi Code. For an empty workstream
+it resumes
 the newest session automatically. For an established workstream, server state
 takes precedence: ai-memory resumes the most recently linked harness that still
 has a usable local session. It never chooses a newer but obsolete session from
@@ -84,7 +86,10 @@ consume the later adoption opportunity.
 3. `AI_MEMORY_RUN_ID` marks lifecycle hooks as managed. SessionStart links the
    actual native session and injects only the portable events that session has
    not seen. Crush, which has no SessionStart hook, receives the same bounded
-   packet through a temporary `options.global_context_paths` entry. Direct
+   packet through a temporary `options.global_context_paths` entry. Kimi Code
+   fires SessionStart but discards its stdout, so the kimi adapter links there
+   and delivers the packet through the UserPromptSubmit hook instead, whose
+   stdout Kimi Code injects as a user message before the turn. Direct
    launches continue to use the existing single-use handoff path.
 4. When the child exits, ai-memory reads the native transcript store without
    modifying it. Visible user/assistant messages, completed tool calls/results,
@@ -118,6 +123,7 @@ is labelled completed evidence and must never be replayed as a pending call.
 | OpenCode | native default creation | `--session <id>` | `~/.local/share/opencode/opencode.db` opened read-only |
 | Pi | generated `--session-id` | `--session <id>` | `~/.pi/agent/sessions/**/*.jsonl` |
 | Crush | native default creation | `--session <id>` | `<project>/.crush/crush.db` opened read-only |
+| Kimi Code | native default creation | `--session <id>` | `$KIMI_CODE_HOME/sessions/*/*/agents/main/wire.jsonl` |
 | OMP | native default creation | `--resume=<id>` | `~/.omp/agent/sessions/**/*.jsonl` |
 
 An explicit native selector such as Claude's `--resume`, OpenCode's `--session`,
@@ -127,7 +133,8 @@ Pi and OMP `--session-dir` values and Crush `--data-dir` values are passed
 through unchanged and used as the read-only import root. Native store
 environment overrides are also honored:
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`,
-`PI_CODING_AGENT_SESSION_DIR`, and `PI_CODING_AGENT_DIR`. The Pi-family adapter
+`PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR`, and `KIMI_CODE_HOME`.
+The Pi-family adapter
 also recognizes a complete `.jsonl.<nonce>.tmp` atomic-write file when a native
 process exits before renaming it; incomplete final JSONL records are never
 imported. Help, version, and known utility subcommands pass through without
@@ -139,11 +146,12 @@ chooser.
 the harness's native dangerous mode. The translation is Claude Code
 `--dangerously-skip-permissions`, Codex
 `--dangerously-bypass-approvals-and-sandbox`, OpenCode `--auto`, Pi `--approve`,
-and Crush `--yolo`. OMP currently needs no added flag. ai-memory does not add a
-duplicate when the translated native flag is already present.
+Crush `--yolo`, and Kimi Code `--yolo`. OMP currently needs no added flag.
+ai-memory does not add a duplicate when the translated native flag is already
+present.
 
 Managed support is intentionally narrower than the general integration matrix.
-Gemini CLI, Kimi Code, Devin CLI, Cursor, Grok Build CLI, and other agents may
+Gemini CLI, Devin CLI, Cursor, Grok Build CLI, and other agents may
 have MCP or lifecycle-hook support without native managed resume. Contributors
 adding another managed harness must follow the [managed-harness contribution
 protocol](managed-harness-contributions.md), including read-only extraction,
@@ -161,7 +169,20 @@ ai-memory install-hooks --agent codex --apply
 ai-memory install-hooks --agent opencode --apply
 ai-memory install-hooks --agent pi --apply
 ai-memory install-hooks --agent omp --apply
+ai-memory install-hooks --agent kimi-code --apply
 ```
+
+Refreshing the Kimi Code hooks is mandatory when upgrading from a release
+before managed kimi support: those hooks fetched the handoff at SessionStart,
+whose stdout Kimi Code discards, so pending handoffs were consumed without
+ever reaching the model. Current hooks deliver it at UserPromptSubmit.
+
+Known Kimi Code adapter limitations: subagent transcripts
+(`agents/<id>/wire.jsonl` other than `main`) are not imported in v1 and are
+recorded as an extraction-loss annotation; the session bucket directory name
+is a one-way hash of the working directory, so discovery always reads
+`state.json`'s `workDir` and never parses the bucket name. The native
+contract was verified against Kimi Code v0.28.1.
 
 Crush needs no ai-memory hook installation for managed mode. The launcher reads
 its one-time context from the server, copies the existing global Crush JSON into
@@ -205,7 +226,7 @@ process launch is fatal; ai-memory does not silently start an unmanaged agent.
 ## Privacy and storage boundaries
 
 ai-memory's managed adapters do not write to Claude, Codex, OpenCode, Pi, Crush,
-or OMP private stores. The launched harness retains normal ownership of its own
+Kimi Code, or OMP private stores. The launched harness retains normal ownership of its own
 session writes. Adapters read only documented or observed local session formats.
 Provider credentials, encrypted content, system/developer prompt records, and
 hidden reasoning are not copied. The server sanitizer runs before both the
@@ -222,8 +243,8 @@ belong in wiki pages through consolidation or explicit durable writes.
 project name. Wiki paths are UUID-keyed, so it moves no server directory, source
 checkout, or native harness session. If the source checkout path itself is
 renamed, absolute-path session locators used by Claude Code, Codex, OpenCode,
-Pi, and OMP may still reference the old path; Crush's project-local `.crush`
-database moves with the checkout.
+Pi, Kimi Code (`state.json`'s `workDir`), and OMP may still reference the old
+path; Crush's project-local `.crush` database moves with the checkout.
 
 There is no portable, supported API that rewrites every harness's private
 project locator. ai-memory therefore does not mutate those stores or silently
@@ -238,8 +259,8 @@ checkout to match exactly.
 ## Manual acceptance
 
 The opt-in acceptance runner exercises launcher edge cases and then orchestrates
-the locally installed Claude, Codex, OpenCode, Pi, Crush, and OMP CLIs through
-one real workstream:
+the locally installed Claude, Codex, OpenCode, Pi, Crush, OMP, and Kimi CLIs
+through one real workstream:
 
 ```bash
 scripts/managed-workstream-acceptance.sh
@@ -251,9 +272,11 @@ the Git fixture are isolated under a temporary directory. Claude, Codex, and
 OpenCode receive only copied authentication material; OMP receives a temporary
 agent directory with read-consistent credential/model database backups and
 copied settings. Crush uses its existing global provider configuration and an
-isolated project database. The deterministic phase also covers first-run
-adoption, bare-mode selection and empty-directory failure, wrapper `--yolo`,
-lease exclusion, Crush context cleanup, and the established-workstream guard
+isolated project database. Kimi Code runs with an isolated `$KIMI_CODE_HOME`
+seeded with the operator's provider configuration. The deterministic phase
+also covers first-run adoption, bare-mode selection and empty-directory
+failure, wrapper `--yolo`, lease exclusion, Crush context cleanup, a fake-mode
+Kimi store/resume/import round trip, and the established-workstream guard
 against obsolete sessions. Native session creation, read-only extraction,
 cross-harness injection, and returning resume paths are all exercised. Docker
 wrapper host execution and remote URL preservation are covered separately by

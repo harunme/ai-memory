@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Managed workstreams now support Kimi Code through `ai-memory run kimi`.
+  Returning runs resume the linked native session with `--session <id>`;
+  fresh sessions are discovered post-exit by exact checkout match through
+  `state.json`'s `workDir` (the session bucket name is a one-way hash and is
+  never parsed). The adapter reads `$KIMI_CODE_HOME/sessions` (default
+  `~/.kimi-code/sessions`) and imports only visible user/assistant/tool
+  messages and compaction summaries from `agents/main/wire.jsonl`, excluding
+  system prompts, hidden reasoning, hook-injected context (`hook_result` and
+  related origins), and subagent transcripts. Wrapper `--yolo` maps to Kimi
+  Code's `--yolo`, and kimi joins the automatic bare-run harness pool.
+
+### Fixed
+- Kimi Code handoffs are now delivered through the `UserPromptSubmit` hook
+  instead of `SessionStart`. Kimi Code fires `SessionStart` but discards the
+  hook's stdout/result (verified against kimi-code v0.28.1,
+  `packages/agent-core/src/session/index.ts`), so the previous hook consumed
+  pending handoffs — legacy and managed — without ever showing them to the
+  model. `UserPromptSubmit` stdout is injected as a user message before the
+  turn. Re-run `ai-memory install-hooks --agent kimi-code --apply` after
+  upgrading.
+
 ## [1.17.3] - 2026-07-22
 
 ### Fixed
