@@ -396,7 +396,7 @@ jq -e --arg id "$kimi_session_id" \
   AI_MEMORY_ACCEPTANCE_ARGV_LOG="$TMP/kimi-second-argv.log" \
   AI_MEMORY_ACCEPTANCE_SENTINEL="AMWS-FAKE-KIMI-TWO" \
     "$BIN" --data-dir "$DATA" run --workstream edge-kimi --executable "$FAKE" \
-      kimi >"$LOGS/edge-kimi-second.log" 2>&1
+      kimi-cli >"$LOGS/edge-kimi-second.log" 2>&1
 )
 diff -u <(printf '%s\n' --session "$kimi_session_id") "$TMP/kimi-second-argv.log"
 kimi_second_hits=$("$BIN" --data-dir "$DATA" workstream-search \
@@ -481,11 +481,15 @@ fi
 
 read -r -a requested_harnesses <<<"$HARNESS_WORDS"
 harnesses=()
-for harness in "${requested_harnesses[@]}"; do
+for requested_harness in "${requested_harnesses[@]}"; do
+  case "$requested_harness" in
+    kimi-code | kimi-cli) harness=kimi ;;
+    *) harness=$requested_harness ;;
+  esac
   if command -v "$harness" >/dev/null 2>&1; then
     harnesses+=("$harness")
   else
-    printf 'skipping unavailable harness: %s\n' "$harness" >&2
+    printf 'skipping unavailable harness: %s\n' "$requested_harness" >&2
   fi
 done
 [ "${#harnesses[@]}" -ge 2 ] || {
@@ -628,7 +632,7 @@ run_harness() {
   if [ -z "$previous" ]; then
     prompt="Do not use tools. Reply with exactly: $current"
   else
-    prompt="Do not use tools. From the injected ai-memory managed-workstream context, identify the most recent assistant sentinel beginning with AMWS-. Reply on one line with that prior sentinel, then $current."
+    prompt="Do not use tools. In the newest assistant event from the injected ai-memory managed-workstream context, find the final whitespace-delimited token beginning with AMWS-. Reply with exactly that token, one space, then $current."
   fi
   if [ "$first_run" = 1 ]; then
     wrapper_args=(--new "$WORKSTREAM_NAME")

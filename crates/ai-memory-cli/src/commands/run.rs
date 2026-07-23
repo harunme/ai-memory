@@ -1237,6 +1237,29 @@ mod tests {
     }
 
     #[test]
+    fn kimi_cli_alias_selects_the_kimi_adapter() {
+        let cli = Cli::try_parse_from([
+            OsStr::new("ai-memory"),
+            OsStr::new("run"),
+            OsStr::new("kimi-cli"),
+            OsStr::new("--model"),
+            OsStr::new("kimi-for-coding"),
+        ])
+        .unwrap();
+        let CliCommand::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert!(matches!(
+            args.harness,
+            Some(crate::cli::RunHarnessChoice::Kimi)
+        ));
+        assert_eq!(
+            args.native_args,
+            ["--model", "kimi-for-coding"].map(OsString::from).to_vec()
+        );
+    }
+
+    #[test]
     fn bare_run_and_wrapper_yolo_parse_without_a_harness() {
         let cli = Cli::try_parse_from(["ai-memory", "run", "--yolo"]).unwrap();
         let CliCommand::Run(args) = cli.command else {

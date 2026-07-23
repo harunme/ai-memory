@@ -15,6 +15,8 @@ ai-memory run claude
 ai-memory run codex --yolo
 # return to Claude Code later; ai-memory supplies Claude's native --resume
 ai-memory run claude --model opus
+# Kimi Code installs `kimi`; `kimi-cli` is accepted as a launcher alias
+ai-memory run kimi-cli
 # or omit the harness and continue the newest usable session automatically
 ai-memory run
 ```
@@ -197,7 +199,9 @@ workstream.
 Legacy sessions that keep `wire.jsonl` directly in the session directory
 (the pre-`agents/` layout the kimi session-store still reads through its
 stat fallback) are neither discovered nor imported in v1. The native
-contract was verified against Kimi Code v0.28.1.
+contract was verified against Kimi Code v0.29.0. The managed launcher accepts
+`kimi`, `kimi-code`, and `kimi-cli`; all three resolve the installed `kimi`
+executable.
 
 Crush needs no ai-memory hook installation for managed mode. The launcher reads
 its one-time context from the server, copies the existing global Crush JSON into
@@ -296,6 +300,8 @@ against obsolete sessions. Native session creation, read-only extraction,
 cross-harness injection, and returning resume paths are all exercised. Docker
 wrapper host execution and remote URL preservation are covered separately by
 the `ai-memory-cli` packaging tests. Set
-`AI_MEMORY_ACCEPTANCE_HARNESSES="claude codex"` to select
-a subset, `AI_MEMORY_ACCEPTANCE_DETERMINISTIC_ONLY=1` to skip model calls, or
+`AI_MEMORY_ACCEPTANCE_HARNESSES="kimi-cli codex"` to select a
+Kimi-to-Codex-to-Kimi round trip (Kimi aliases normalize to the installed
+`kimi` executable), `AI_MEMORY_ACCEPTANCE_DETERMINISTIC_ONLY=1` to skip model
+calls, or
 `AI_MEMORY_ACCEPTANCE_KEEP=1` to retain all temporary logs and data.
