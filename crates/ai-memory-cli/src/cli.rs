@@ -217,7 +217,7 @@ pub enum RunHarnessChoice {
     #[value(alias = "oh-my-pi")]
     Omp,
     /// Moonshot AI Kimi Code.
-    #[value(name = "kimi", alias = "kimi-code")]
+    #[value(name = "kimi", alias = "kimi-code", alias = "kimi-cli")]
     Kimi,
 }
 

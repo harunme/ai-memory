@@ -34,7 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for what it can contain and where it flows. Script-fallback installs cannot
   sanitize the field and drop the whole Stop event instead; move to a native
   install to capture it.
-- Managed workstreams now support Kimi Code through `ai-memory run kimi`.
+- Managed workstreams now support Kimi Code through `ai-memory run kimi`;
+  `kimi-code` and `kimi-cli` are accepted aliases for the installed `kimi`
+  executable.
   Returning runs resume the linked native session with `--session <id>`;
   fresh sessions are discovered post-exit by exact checkout match through
   `state.json`'s `workDir` (the session bucket name is a one-way hash and is
@@ -43,7 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages and compaction summaries from `agents/main/wire.jsonl`, excluding
   system prompts, hidden reasoning, hook-injected context (`hook_result` and
   related origins), and subagent transcripts. Wrapper `--yolo` maps to Kimi
-  Code's `--yolo`, and kimi joins the automatic bare-run harness pool.
+  Code's `--yolo`, and kimi joins the automatic bare-run harness pool. The
+  deterministic and opt-in real-harness acceptance paths cover Kimi creation,
+  transcript import, cross-harness delivery, and returning native resume; the
+  native contract was live-verified against Kimi Code v0.29.0.
 
 ### Fixed
 - Native hook spool retries now reuse a per-entry idempotency key, so a lost

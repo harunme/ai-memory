@@ -37,7 +37,7 @@ impl ManagedHarness {
             "pi" => Some(Self::Pi),
             "crush" => Some(Self::Crush),
             "omp" | "oh-my-pi" => Some(Self::Omp),
-            "kimi" | "kimi-code" => Some(Self::Kimi),
+            "kimi" | "kimi-code" | "kimi-cli" => Some(Self::Kimi),
             _ => None,
         }
     }
@@ -904,6 +904,13 @@ mod tests {
         assert_eq!(strings(&plan.args), ["continue here"]);
         assert_eq!(plan.expected_session_id, None);
         assert_eq!(plan.mode, LaunchMode::Session);
+    }
+
+    #[test]
+    fn kimi_cli_name_is_an_alias_for_kimi_code() {
+        for name in ["kimi", "kimi-code", "kimi-cli"] {
+            assert_eq!(ManagedHarness::from_name(name), Some(ManagedHarness::Kimi));
+        }
     }
 
     #[test]

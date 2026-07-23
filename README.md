@@ -64,14 +64,16 @@ priors are at the [bottom](#influences-and-prior-art).
   sanitized prompt, tool-lifecycle, and session-boundary observations. Direct
   launches keep this lightweight path; it is not a complete native transcript.
 - **Opt-in managed workstreams.** `ai-memory run claude`, then `ai-memory run
-  codex --yolo`, transparently resumes one logical workstream with native
-  per-harness sessions, a portable visible-event ledger, and full-ledger search.
+  codex --yolo`, then `ai-memory run kimi`, transparently resumes one logical
+  workstream with native per-harness sessions, a portable visible-event ledger,
+  and full-ledger search.
   `ai-memory run` with no harness continues the newest usable Claude Code,
   Codex, OpenCode, Pi, Crush, or Kimi Code session for this checkout. On first
   explicit use, an interactive launcher can adopt a previous session from the
   same checkout; later switches cannot select unrelated native history. Native
   arguments pass through unchanged except the wrapper-owned `--yolo`; direct
-  commands are unaffected.
+  commands are unaffected. `kimi-code` and `kimi-cli` are accepted aliases for
+  the installed `kimi` command.
 - **Per-repository capture exclusions.** A nearest-marker `[capture]`
   `ignore_paths` policy drops matching recognized file-tool events before they
   reach the local spool or server. See [the capture policy reference](docs/marker-file.md#capture-exclusions).
