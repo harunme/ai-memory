@@ -1992,7 +1992,24 @@ async fn process(
     // below wants the scrubbed title, so keep a copy before the move.
     let sanitized = Sanitized::new(raw_obs, &state.sanitizer);
     let log_title = sanitized.inner().title.clone();
-    let _ = state.writer.insert_observation(sanitized).await?;
+    // Idempotent ingest: when the client minted an `ingest_key` for this
+    // spooled event, the key claim commits atomically with the observation.
+    // `None` back means a previous delivery of this exact entry already
+    // landed (the response was lost and the client retried) — skip the
+    // whole replay: the observation, wiki pages, handoff and log line were
+    // all produced by the first delivery. The client still gets the same
+    // success it would have gotten then.
+    let inserted = state
+        .writer
+        .insert_observation_ingest(sanitized, env.ingest_key.clone())
+        .await?;
+    if inserted.is_none() {
+        debug!(
+            key = env.ingest_key.as_deref().unwrap_or(""),
+            "duplicate ingest_key; skipping replayed event"
+        );
+        return Ok(());
+    }
 
     // Append the log line to the per-project log.md.
     if let Err(e) = log::append_event(
@@ -2678,6 +2695,81 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "marker-file overrides must still rescope"
+        );
+    }
+
+    /// A spooled event retried after a lost response re-sends the same
+    /// `ingest_key`; the replay must not duplicate the observation. A fresh
+    /// key (a genuinely new event) and keyless events (older clients) keep
+    /// landing exactly as today.
+    #[tokio::test]
+    async fn replayed_ingest_key_does_not_duplicate_observation() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "55555555-5555-5555-5555-555555555555";
+        let cwd = tmp.path().join("idem");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    ingest_key: key.map(str::to_string),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": sid,
+                    "cwd": cwd.to_string_lossy(),
+                    "prompt": "hello",
+                }),
+            )
+        };
+
+        process(&state, fire("session-start", None), None)
+            .await
+            .unwrap();
+        // First delivery lands; the byte-identical replay is skipped.
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-abc123")),
+            None,
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-abc123")),
+            None,
+        )
+        .await
+        .unwrap();
+        // A different key is a new event, not a replay.
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-def456")),
+            None,
+        )
+        .await
+        .unwrap();
+        // Keyless events (older clients) keep at-least-once behavior.
+        process(&state, fire("user-prompt-submit", None), None)
+            .await
+            .unwrap();
+        process(&state, fire("user-prompt-submit", None), None)
+            .await
+            .unwrap();
+
+        let session_id: SessionId = sid.parse().unwrap();
+        let observations = state
+            .reader
+            .observations_for_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            observations.len(),
+            5,
+            "session-start + first keyed + fresh key + 2 keyless (replay skipped)"
         );
     }
 

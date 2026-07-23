@@ -830,6 +830,53 @@ pub fn insert_observation(
     conn: &mut Connection,
     obs: &NewObservation,
 ) -> StoreResult<ObservationId> {
+    insert_observation_row(conn, obs)
+}
+
+/// Ingest-keys older than this are swept opportunistically on every keyed
+/// insert. Keys only need to outlive the client spool (7 days + retry
+/// backoff); 30 days is a generous margin.
+const INGEST_KEY_TTL_MICROS: i64 = 30 * 24 * 60 * 60 * 1_000_000;
+
+/// Append an observation carrying a client idempotency key, atomically.
+///
+/// The key claim and the observation row commit in ONE transaction: either
+/// both land or neither does, so a crash cannot claim a key without its
+/// observation (which a later retry would then wrongly skip). A key that was
+/// already claimed means a previous delivery of the same spooled event
+/// succeeded but the client never saw the response — return `Ok(None)` so the
+/// ingest path can skip the replay without erroring (the response to the
+/// client is the same `202 "queued"` either way).
+pub fn insert_observation_keyed(
+    conn: &mut Connection,
+    obs: &NewObservation,
+    ingest_key: &str,
+) -> StoreResult<Option<ObservationId>> {
+    let now = Timestamp::now().as_microsecond();
+    let tx = conn.transaction()?;
+    let claimed = tx.execute(
+        "INSERT OR IGNORE INTO ingest_keys (key, seen_at) VALUES (?1, ?2)",
+        params![ingest_key, now],
+    )?;
+    if claimed == 0 {
+        // Replay of an already-processed event.
+        tx.commit()?;
+        return Ok(None);
+    }
+    // Opportunistic TTL sweep — indexed on seen_at, deletes 0 rows in the
+    // common case, keeps the table self-maintaining without a scheduler job.
+    tx.execute(
+        "DELETE FROM ingest_keys WHERE seen_at < ?1",
+        params![now - INGEST_KEY_TTL_MICROS],
+    )?;
+    let id = insert_observation_row(&tx, obs)?;
+    tx.commit()?;
+    Ok(Some(id))
+}
+
+/// The observation INSERT itself, shared by the plain and keyed paths
+/// (`&Connection` so it also runs inside a [`rusqlite::Transaction`]).
+fn insert_observation_row(conn: &Connection, obs: &NewObservation) -> StoreResult<ObservationId> {
     let id = ObservationId::new();
     let now = Timestamp::now().as_microsecond();
     let kind = observation_kind_as_str(obs.kind);

@@ -2411,6 +2411,86 @@ mod tests {
         }
     }
 
+    /// Ingest idempotency at the store boundary: the same `ingest_key`
+    /// claims once — a replay answers `None` and writes nothing — while the
+    /// keyless path is untouched. Old keys are swept opportunistically by
+    /// the next keyed insert once past the TTL.
+    #[tokio::test]
+    async fn insert_observation_ingest_dedups_on_key() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", None)
+            .await
+            .unwrap();
+        let session_id = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                id: session_id,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        let obs = || NewObservation {
+            session_id,
+            workspace_id: ws,
+            project_id: proj,
+            kind: ObservationKind::UserPrompt,
+            extension: None,
+            source_event: None,
+            title: "prompt".into(),
+            body: "hello".into(),
+            importance: 5,
+        };
+        let keyed = |key: &str| {
+            store.writer.insert_observation_ingest(
+                Sanitized::new(obs(), &Sanitizer::builtin()),
+                Some(key.to_string()),
+            )
+        };
+
+        // First delivery lands, the replay is recognized and skipped.
+        assert!(keyed("entry-1").await.unwrap().is_some());
+        assert!(keyed("entry-1").await.unwrap().is_none());
+        // A different key is a new event.
+        assert!(keyed("entry-2").await.unwrap().is_some());
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "replay must not append a row");
+
+        // TTL: backdate one key past the sweep horizon; the next keyed
+        // insert purges it in the same transaction.
+        conn.execute(
+            "UPDATE ingest_keys SET seen_at = 1 WHERE key = 'entry-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(keyed("entry-3").await.unwrap().is_some());
+        let conn = Connection::open(store.db_path()).unwrap();
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ingest_keys WHERE key = 'entry-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "expired key must be swept");
+    }
+
     #[tokio::test]
     async fn latest_completed_session_for_project_ignores_open_sessions() {
         let tmp = TempDir::new().unwrap();

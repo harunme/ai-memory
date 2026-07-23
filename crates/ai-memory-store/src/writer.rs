@@ -91,7 +91,11 @@ pub(crate) enum WriteCmd {
     },
     InsertObservation {
         obs: NewObservation,
-        reply: oneshot::Sender<StoreResult<ObservationId>>,
+        /// Client idempotency key from the hook ingest path — `Some` claims
+        /// the key atomically with the row; an already-claimed key answers
+        /// `Ok(None)` (duplicate replay, skip). `None` = plain insert.
+        ingest_key: Option<String>,
+        reply: oneshot::Sender<StoreResult<Option<ObservationId>>>,
     },
     InsertHandoff {
         handoff: NewHandoff,
@@ -484,10 +488,34 @@ impl WriterHandle {
         &self,
         obs: Sanitized<NewObservation>,
     ) -> StoreResult<ObservationId> {
+        let inserted = self.insert_observation_ingest(obs, None).await?;
+        Ok(inserted.expect("insert without an ingest key cannot be a duplicate"))
+    }
+
+    /// Append an observation from the hook-ingest path, deduplicating on the
+    /// client idempotency key when one travelled with the event.
+    ///
+    /// With `Some(key)`, the key claim and the row commit in one store
+    /// transaction; a key already claimed by an earlier delivery answers
+    /// `Ok(None)` so the caller can skip the replay's side effects and still
+    /// respond identically to the client. With `None` this is exactly
+    /// [`Writer::insert_observation`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn insert_observation_ingest(
+        &self,
+        obs: Sanitized<NewObservation>,
+        ingest_key: Option<String>,
+    ) -> StoreResult<Option<ObservationId>> {
         let obs = obs.into_inner();
         let (tx, rx) = oneshot::channel();
-        self.send(WriteCmd::InsertObservation { obs, reply: tx })
-            .await?;
+        self.send(WriteCmd::InsertObservation {
+            obs,
+            ingest_key,
+            reply: tx,
+        })
+        .await?;
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
@@ -1251,8 +1279,15 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 let result = ops::sweep_hollow_projects(&mut conn, min_age_days);
                 send_or_warn(reply, result, "sweep_hollow_projects");
             }
-            WriteCmd::InsertObservation { obs, reply } => {
-                let result = ops::insert_observation(&mut conn, &obs);
+            WriteCmd::InsertObservation {
+                obs,
+                ingest_key,
+                reply,
+            } => {
+                let result = match ingest_key.as_deref() {
+                    Some(key) => ops::insert_observation_keyed(&mut conn, &obs, key),
+                    None => ops::insert_observation(&mut conn, &obs).map(Some),
+                };
                 send_or_warn(reply, result, "insert_observation");
             }
             WriteCmd::InsertHandoff { handoff, reply } => {

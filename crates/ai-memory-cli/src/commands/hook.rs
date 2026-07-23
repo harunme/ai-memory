@@ -507,8 +507,14 @@ where
     } else {
         ""
     };
+    // Idempotency key: minted ONCE here and baked into the spooled URL, so
+    // every retry of this entry re-sends the same key. The server claims it
+    // atomically with the observation row and skips replays whose previous
+    // delivery succeeded but whose response was lost — closing the
+    // conservative-retry duplication vector. Older servers ignore the param.
+    let ingest_key = uuid::Uuid::new_v4().simple().to_string();
     let event_url = format!(
-        "{base}/hook?event={}&agent={}{}{}",
+        "{base}/hook?event={}&agent={}{}{}&ingest_key={ingest_key}",
         args.event, args.agent, hook_qs, capture_qs
     );
     let entry = hook_spool::entry_for(
