@@ -2799,6 +2799,7 @@ fn test_optional_parts() -> OptionalParts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ai_memory_core::{Sanitized, Sanitizer};
     use std::collections::BTreeSet;
 
     #[test]
@@ -2973,17 +2974,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id,
-                project_id,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: title.into(),
-                body: body.into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id,
+                    project_id,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: title.into(),
+                    body: body.into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
     }
@@ -4075,17 +4079,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: proj,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "raw prompt".into(),
-                body: "raw fallback contains quokka only detail".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "raw prompt".into(),
+                    body: "raw fallback contains quokka only detail".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
 
@@ -4144,17 +4151,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: scoped,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "raw prompt".into(),
-                body: "raw fallback contains quokka only detail".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: scoped,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "raw prompt".into(),
+                    body: "raw fallback contains quokka only detail".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
 

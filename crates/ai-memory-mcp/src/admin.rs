@@ -4972,6 +4972,7 @@ fn map_user_store_err(e: ai_memory_store::StoreError) -> (StatusCode, Json<serde
 mod tests {
     use super::*;
     use ai_memory_core::{AgentKind, NewObservation, NewSession, ObservationKind};
+    use ai_memory_core::{Sanitized, Sanitizer};
     use ai_memory_llm::{ChatRequest, ChatResponse, LlmResult};
     use ai_memory_store::Store;
     use axum::body::to_bytes;
@@ -5409,17 +5410,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: proj,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "prompt".into(),
-                body: "focus changed and durable lesson".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "prompt".into(),
+                    body: "focus changed and durable lesson".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
 
@@ -5536,17 +5540,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: proj,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "prompt".into(),
-                body: "focus changed and durable lesson".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "prompt".into(),
+                    body: "focus changed and durable lesson".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
         let mut state =
@@ -5631,17 +5638,20 @@ mod tests {
             .unwrap();
         store
             .writer
-            .insert_observation(NewObservation {
-                session_id,
-                workspace_id: ws,
-                project_id: proj,
-                kind: ObservationKind::UserPrompt,
-                extension: None,
-                source_event: None,
-                title: "prompt".into(),
-                body: "durable lesson".into(),
-                importance: 5,
-            })
+            .insert_observation(Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "prompt".into(),
+                    body: "durable lesson".into(),
+                    importance: 5,
+                },
+                &Sanitizer::builtin(),
+            ))
             .await
             .unwrap();
         let mut state =
