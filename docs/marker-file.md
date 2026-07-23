@@ -86,6 +86,10 @@ default_global = "true"
 # session start. Only agents whose session-start hook injects stdout as
 # context benefit (Claude Code, Codex, OpenCode, …). Off by default: the
 # brief costs tokens on EVERY session start, so opt in per repo.
+# Kimi Code note: kimi discards SessionStart hook stdout, so there the
+# brief is delivered on the FIRST user prompt of the session instead
+# (once per session, same as Claude); re-briefing after /clear is not
+# supported in v1.
 [briefing]
 inject_on_session_start = "true"
 

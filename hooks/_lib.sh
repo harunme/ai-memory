@@ -37,6 +37,18 @@ ai_memory_parse_toml_key() {
         "$file" | head -n 1
 }
 
+# Like ai_memory_parse_toml_key but also accepts a BARE value
+# (`key = true` / `key = 6000`), so section-style flags such as
+# `[briefing] inject_on_session_start = true` work quoted or not.
+# Parity with `parse_toml_flag` in hook_capture.rs: line-based (section
+# headers are ignored), first match wins, trailing `# comment` stripped.
+ai_memory_parse_toml_flag() {
+    file="$1"; key="$2"
+    [ -f "$file" ] || return 0
+    sed -n -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"?([^\"#]*)\"?.*/\1/p" \
+        "$file" | head -n 1 | sed 's/[[:space:]]*$//'
+}
+
 # Extract the first cwd-like path from a JSON payload on stdin or in $1.
 # Returns the value or nothing. This is intentionally a tiny shell fallback,
 # not a JSON parser; taking the first match preserves the top-level cwd when
@@ -204,6 +216,35 @@ ai_memory_marker_qs() {
     [ -n "$ds" ] && qs="${qs}&drop_subagent=$(ai_memory_url_encode "$ds")"
     qs="${qs}$(ai_memory_managed_qs)"
     printf '%s' "$qs"
+}
+
+# Build `&briefing=<v>[&briefing_budget=<v>]` from the `[briefing]` section
+# of the marker walked up from "$1" (inject_on_session_start + optional
+# max_chars). Prints nothing when cwd is absent or the repo did not opt in.
+# NOT part of ai_memory_marker_qs on purpose: agents that deliver the brief
+# once per session (kimi-code, via the first user prompt — kimi discards
+# SessionStart hook stdout) append this only on the first fetch, so the
+# server does not recompose the brief on every request. Truthiness and the
+# char-budget clamp are decided server-side.
+ai_memory_briefing_qs() {
+    cwd="$1"
+    [ -z "$cwd" ] && return 0
+    marker=$(ai_memory_find_marker "$cwd")
+    [ -n "$marker" ] || return 0
+    qs=""
+    briefing=$(ai_memory_parse_toml_flag "$marker" inject_on_session_start)
+    budget=$(ai_memory_parse_toml_flag "$marker" max_chars)
+    [ -n "$briefing" ] && qs="&briefing=$(ai_memory_url_encode "$briefing")"
+    [ -n "$budget" ] && qs="${qs}&briefing_budget=$(ai_memory_url_encode "$budget")"
+    printf '%s' "$qs"
+}
+
+# Path of the once-per-session "brief delivered" marker for "$1" (a session
+# id or a caller-built fallback key), sanitized to a safe file name under
+# the shared state dir.
+ai_memory_briefed_file() {
+    key=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')
+    printf '%s/briefed/%s' "$(ai_memory_state_dir)" "$key"
 }
 
 # Local bridge state for agents whose hook payloads do not carry a session id.

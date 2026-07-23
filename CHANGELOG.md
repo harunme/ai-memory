@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `user-prompt-submit` event token alongside `user-prompt` for kimi handoff
   delivery. Re-run `ai-memory install-hooks --agent kimi-code --apply` after
   upgrading.
+- The `[briefing]` compiled project brief is now gated to once per session
+  for Kimi Code: it rides the first user prompt (kimi discards SessionStart
+  hook stdout, so session-start delivery is impossible) and later prompts
+  keep fetching the handoff without the briefing params, so the server no
+  longer recomposes the brief on every prompt. Re-briefing after `/clear`
+  is not supported in v1.
 
 ## [1.17.3] - 2026-07-22
 

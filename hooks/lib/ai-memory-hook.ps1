@@ -61,6 +61,49 @@ function Get-AiMemoryTomlKey {
     return $null
 }
 
+# Like Get-AiMemoryTomlKey but also accepts a BARE value (`key = true` /
+# `key = 6000`), so section-style flags such as
+# `[briefing] inject_on_session_start = true` work quoted or not. Parity
+# with `parse_toml_flag` in hook_capture.rs: line-based, first match wins,
+# trailing `# comment` stripped.
+function Get-AiMemoryTomlFlag {
+    param([string] $File, [string] $Key)
+    if (-not (Test-Path $File -PathType Leaf)) { return $null }
+    foreach ($line in Get-Content $File) {
+        $m = [regex]::Match($line, "^\s*$Key\s*=\s*`"?([^`"#]*)`"?\s*(#.*)?$")
+        if ($m.Success) { return $m.Groups[1].Value.Trim() }
+    }
+    return $null
+}
+
+# Build `&briefing=<v>[&briefing_budget=<v>]` from the `[briefing]` section
+# of the marker walked up from $Cwd. Returns "" when the repo did not opt
+# in. Used by agents that deliver the compiled project brief once per
+# session (kimi-code, via the first user prompt — kimi discards
+# SessionStart hook stdout) so the server does not recompose the brief on
+# every request. Truthiness and the char-budget clamp are server-side.
+function Get-AiMemoryBriefingQuery {
+    param([string] $Cwd)
+    if (-not $Cwd) { return "" }
+    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
+    if (-not $marker) { return "" }
+    $qs = ""
+    $briefing = Get-AiMemoryTomlFlag -File $marker -Key "inject_on_session_start"
+    $budget = Get-AiMemoryTomlFlag -File $marker -Key "max_chars"
+    if ($briefing) { $qs += "&briefing=$([uri]::EscapeDataString($briefing))" }
+    if ($budget) { $qs += "&briefing_budget=$([uri]::EscapeDataString($budget))" }
+    return $qs
+}
+
+# Path of the once-per-session "brief delivered" marker for $Key (a session
+# id or a caller-built fallback key), sanitized to a safe file name under
+# the shared state dir.
+function Get-AiMemoryBriefedFile {
+    param([string] $Key)
+    $safe = ($Key -replace '[^A-Za-z0-9._-]', '_')
+    return (Join-Path (Join-Path (Get-AiMemoryStateDir) "briefed") $safe)
+}
+
 # Resolve the basename of the MAIN git repository root for $Cwd, following the
 # worktree commondir pointer so every linked worktree collapses to one stable
 # name. Mirrors the POSIX `ai_memory_repo_root_project`: a containerized server
@@ -182,7 +225,14 @@ function Invoke-AiMemoryHook {
         [Parameter(Mandatory = $true)] [string] $Event,
         [Parameter(Mandatory = $true)] [string] $Agent,
         [switch] $FetchHandoff,
-        [switch] $AntigravityPreInvocationOutput
+        [switch] $AntigravityPreInvocationOutput,
+        # Deliver the `[briefing]` compiled project brief on the FIRST
+        # handoff fetch of a session only (kimi-code's user-prompt path:
+        # kimi discards SessionStart hook stdout, so the brief rides the
+        # first prompt — parity with Claude's once-per-SessionStart brief).
+        # Later fetches keep the handoff but drop the briefing params so the
+        # server does not recompose the brief per prompt.
+        [switch] $BriefingOncePerSession
     )
 
     $Server = if ($env:AI_MEMORY_HOOK_URL) { $env:AI_MEMORY_HOOK_URL } else { "http://127.0.0.1:49374" }
@@ -233,11 +283,28 @@ function Invoke-AiMemoryHook {
             }
         } catch {
         }
+        # Once-per-session briefing gate, keyed by the native session id
+        # (kimi always sends `sessionId`); without one, a stable hash of
+        # agent+cwd so a session-less payload still briefs only once.
+        $BriefQS = ""
+        $BriefFile = $null
+        if ($BriefingOncePerSession) {
+            $BriefKey = [string]$NativeSessionId
+            if (-not $BriefKey) {
+                $Sha = [System.Security.Cryptography.SHA256]::Create()
+                $Bytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$Agent`n$Cwd"))
+                $BriefKey = (($Bytes | ForEach-Object { $_.ToString("x2") }) -join "")
+            }
+            $BriefFile = Get-AiMemoryBriefedFile -Key $BriefKey
+            if (-not (Test-Path $BriefFile -PathType Leaf)) {
+                $BriefQS = Get-AiMemoryBriefingQuery -Cwd $Cwd
+            }
+        }
         try {
             $Response = Invoke-WebRequest `
                 -UseBasicParsing `
                 -TimeoutSec 2 `
-                -Uri "$Server/handoff?agent=$Agent$QS$NativeSessionQS" `
+                -Uri "$Server/handoff?agent=$Agent$QS$NativeSessionQS$BriefQS" `
                 -Headers $Headers
             if ($null -ne $Response -and $Response.Content) {
                 if ($AntigravityPreInvocationOutput) {
@@ -255,6 +322,14 @@ function Invoke-AiMemoryHook {
             if ($AntigravityPreInvocationOutput) {
                 [Console]::Out.Write("{}")
             }
+        }
+        # Mark the session as briefed only AFTER the GET completed —
+        # success or error (fail-open: with the server down, re-sending the
+        # brief-flagged request on every prompt would deliver nothing
+        # anyway, and the one lost brief returns on the next session).
+        if ($BriefFile) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $BriefFile -Parent) -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType File -Force -Path $BriefFile -ErrorAction SilentlyContinue | Out-Null
         }
     } elseif ($AntigravityPreInvocationOutput) {
         [Console]::Out.Write("{}")
