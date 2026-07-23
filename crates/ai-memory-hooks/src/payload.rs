@@ -64,6 +64,13 @@ pub struct HookQuery {
     /// `_ai_memory_assistant` excerpt; the server still gates on its own
     /// `capture_assistant` config before persisting it (#196).
     pub capture_assistant: Option<String>,
+    /// Client idempotency key, minted once when the event is spooled and
+    /// re-sent verbatim on every retry of that entry. Lets the server drop
+    /// a replay whose previous delivery succeeded but whose response was
+    /// lost (the conservative-retry duplication vector). Absent on older
+    /// clients; older servers ignore it — both directions keep today's
+    /// behavior.
+    pub ingest_key: Option<String>,
 }
 
 /// Coalesced view of an incoming hook event after light parsing of the
@@ -110,6 +117,10 @@ pub struct HookEnvelope {
     /// command). The server still gates on its own `capture_assistant` config
     /// before honoring it (#196).
     pub capture_assistant_requested: bool,
+    /// Validated client idempotency key (`ingest_key` query param): 1–64
+    /// ASCII `[A-Za-z0-9_-]` chars, else dropped at parse time. `Some` makes
+    /// the ingest path dedup the event against a replayed delivery.
+    pub ingest_key: Option<String>,
     /// Optional title hint extracted from the body.
     pub title_hint: Option<String>,
     /// Optional body excerpt extracted from the agent's raw payload.
@@ -420,6 +431,7 @@ impl HookEnvelope {
                     .and_then(|_| extension_body_excerpt(&raw))
             })
         };
+        let ingest_key = query.ingest_key.filter(|k| valid_ingest_key(k));
         Self {
             event,
             agent,
@@ -432,6 +444,7 @@ impl HookEnvelope {
             recall_default_global_requested,
             managed_run,
             capture_assistant_requested,
+            ingest_key,
             extension,
             source_event,
             title_hint,
@@ -439,6 +452,18 @@ impl HookEnvelope {
             raw,
         }
     }
+}
+
+/// An ingest key is client-controlled input: accept only short, plain tokens
+/// (1–64 ASCII alphanumerics, `-` or `_` — a UUID simple/hyphenated form
+/// fits). Anything else is treated as absent rather than rejected, so a
+/// malformed key degrades to today's at-least-once behavior instead of a 4xx.
+fn valid_ingest_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn legacy_tool_title(
@@ -878,6 +903,37 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "raw was not redacted");
         assert!(rendered.contains("UserPrompt"), "event field went missing");
         assert!(rendered.contains("run-1"), "managed run field went missing");
+    }
+
+    /// `ingest_key` is client-controlled input: only short plain tokens pass;
+    /// anything else degrades to "absent" (at-least-once), never a 4xx.
+    #[test]
+    fn ingest_key_is_validated_at_parse_time() {
+        let fire = |key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "stop".into(),
+                    ingest_key: key.map(str::to_string),
+                    ..Default::default()
+                },
+                serde_json::json!({ "session_id": "k-1" }),
+            )
+        };
+        // A UUID in simple or hyphenated form passes untouched.
+        assert_eq!(
+            fire(Some("abcDEF123_-")).ingest_key.as_deref(),
+            Some("abcDEF123_-")
+        );
+        // Empty, oversized or non-token input is dropped, not rejected.
+        let oversized = "x".repeat(65);
+        for bad in ["", "spaces here", "chave!", "key\n", oversized.as_str()] {
+            assert_eq!(
+                fire(Some(bad)).ingest_key,
+                None,
+                "expected {bad:?} to be dropped"
+            );
+        }
+        assert_eq!(fire(None).ingest_key, None);
     }
 
     #[test]

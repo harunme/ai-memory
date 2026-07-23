@@ -395,6 +395,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 ingest_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
                     DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
                 )),
+                ingest_gates: ai_memory_hooks::IngestGates::default(),
                 consolidate_on_session_end: config.consolidate_on_session_end,
                 capture_assistant_enabled: config.capture_assistant,
                 subagent_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(

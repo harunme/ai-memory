@@ -37,7 +37,10 @@ pub use auto_improve::{
 pub use decay::{DecayParams, retention_score};
 pub use error::{StoreError, StoreResult};
 pub use maintenance::MaintenanceJob;
-pub use ops::{DeleteWorkspaceSummary, EmbeddingWrite, MoveSummary, PurgeSummary, ReorgSummary};
+pub use ops::{
+    DeleteWorkspaceSummary, EmbeddingWrite, IngestObservationOutcome, MoveSummary, PurgeSummary,
+    ReorgSummary,
+};
 pub use reader::{
     ActivityWindow, AutoImproveCandidateSession, BriefPageBody, BriefingPage, BriefingSnapshot,
     ContaminationFinding, ContaminationReport, ContaminationSummary, DecayCandidate,
@@ -2409,6 +2412,126 @@ mod tests {
                 "secret reached disk unscrubbed: {col}"
             );
         }
+    }
+
+    /// Ingest idempotency distinguishes pending and completed replays, scopes
+    /// keys per project, and permits reuse after the TTL.
+    #[tokio::test]
+    async fn insert_observation_ingest_dedups_on_key() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj_a = store
+            .writer
+            .get_or_create_project(ws, "project-a", None)
+            .await
+            .unwrap();
+        let proj_b = store
+            .writer
+            .get_or_create_project(ws, "project-b", None)
+            .await
+            .unwrap();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        for (session_id, project_id) in [(session_a, proj_a), (session_b, proj_b)] {
+            store
+                .writer
+                .begin_session(NewSession {
+                    id: session_id,
+                    workspace_id: ws,
+                    project_id,
+                    agent_kind: AgentKind::ClaudeCode,
+                    cwd: None,
+                })
+                .await
+                .unwrap();
+        }
+        let obs = |session_id, project_id| NewObservation {
+            session_id,
+            workspace_id: ws,
+            project_id,
+            kind: ObservationKind::UserPrompt,
+            extension: None,
+            source_event: None,
+            title: "prompt".into(),
+            body: "hello".into(),
+            importance: 5,
+        };
+
+        let first = store
+            .writer
+            .insert_observation_ingest(
+                Sanitized::new(obs(session_a, proj_a), &Sanitizer::builtin()),
+                "entry-1".into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(first, IngestObservationOutcome::Inserted(_)));
+        let pending = store
+            .writer
+            .insert_observation_ingest(
+                Sanitized::new(obs(session_a, proj_a), &Sanitizer::builtin()),
+                "entry-1".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pending, IngestObservationOutcome::ResumePending);
+        store
+            .writer
+            .complete_observation_ingest(proj_a, "entry-1".into())
+            .await
+            .unwrap();
+        let complete = store
+            .writer
+            .insert_observation_ingest(
+                Sanitized::new(obs(session_a, proj_a), &Sanitizer::builtin()),
+                "entry-1".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(complete, IngestObservationOutcome::AlreadyComplete);
+
+        // The same untrusted token cannot suppress an event in another project.
+        let other_project = store
+            .writer
+            .insert_observation_ingest(
+                Sanitized::new(obs(session_b, proj_b), &Sanitizer::builtin()),
+                "entry-1".into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            other_project,
+            IngestObservationOutcome::Inserted(_)
+        ));
+        let conn = Connection::open(store.db_path()).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "replay must not append a row");
+
+        // Sweep runs before lookup, so an expired current key can be reused
+        // without waiting for an unrelated keyed insert.
+        conn.execute(
+            "UPDATE ingest_keys SET seen_at = 1 \
+             WHERE project_id = ?1 AND key = 'entry-1'",
+            params![proj_a.as_bytes()],
+        )
+        .unwrap();
+        drop(conn);
+        let reused = store
+            .writer
+            .insert_observation_ingest(
+                Sanitized::new(obs(session_a, proj_a), &Sanitizer::builtin()),
+                "entry-1".into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reused, IngestObservationOutcome::Inserted(_)));
     }
 
     #[tokio::test]

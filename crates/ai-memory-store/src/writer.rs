@@ -23,7 +23,8 @@ use crate::auto_improve::{
 };
 use crate::error::{StoreError, StoreResult};
 use crate::ops::{
-    self, DeleteWorkspaceSummary, EmbeddingWrite, MoveSummary, PurgeSummary, ReorgSummary,
+    self, DeleteWorkspaceSummary, EmbeddingWrite, IngestObservationOutcome, MoveSummary,
+    PurgeSummary, ReorgSummary,
 };
 use crate::users::{self, TOKEN_HASH_LEN};
 use crate::workstream::{
@@ -92,6 +93,16 @@ pub(crate) enum WriteCmd {
     InsertObservation {
         obs: NewObservation,
         reply: oneshot::Sender<StoreResult<ObservationId>>,
+    },
+    InsertObservationIngest {
+        obs: NewObservation,
+        ingest_key: String,
+        reply: oneshot::Sender<StoreResult<IngestObservationOutcome>>,
+    },
+    CompleteObservationIngest {
+        project_id: ProjectId,
+        ingest_key: String,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
     InsertHandoff {
         handoff: NewHandoff,
@@ -484,10 +495,55 @@ impl WriterHandle {
         &self,
         obs: Sanitized<NewObservation>,
     ) -> StoreResult<ObservationId> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::InsertObservation {
+            obs: obs.into_inner(),
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Claim a keyed hook event and append its observation atomically.
+    ///
+    /// The outcome tells the hook router whether it inserted a new observation,
+    /// must resume incomplete downstream effects, or can skip a fully completed
+    /// replay. Keys are scoped to the observation's project.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn insert_observation_ingest(
+        &self,
+        obs: Sanitized<NewObservation>,
+        ingest_key: String,
+    ) -> StoreResult<IngestObservationOutcome> {
         let obs = obs.into_inner();
         let (tx, rx) = oneshot::channel();
-        self.send(WriteCmd::InsertObservation { obs, reply: tx })
-            .await?;
+        self.send(WriteCmd::InsertObservationIngest {
+            obs,
+            ingest_key,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Mark a keyed hook event complete after all downstream effects finish.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL/state errors.
+    pub async fn complete_observation_ingest(
+        &self,
+        project_id: ProjectId,
+        ingest_key: String,
+    ) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::CompleteObservationIngest {
+            project_id,
+            ingest_key,
+            reply: tx,
+        })
+        .await?;
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
@@ -1254,6 +1310,22 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::InsertObservation { obs, reply } => {
                 let result = ops::insert_observation(&mut conn, &obs);
                 send_or_warn(reply, result, "insert_observation");
+            }
+            WriteCmd::InsertObservationIngest {
+                obs,
+                ingest_key,
+                reply,
+            } => {
+                let result = ops::insert_observation_keyed(&mut conn, &obs, &ingest_key);
+                send_or_warn(reply, result, "insert_observation_ingest");
+            }
+            WriteCmd::CompleteObservationIngest {
+                project_id,
+                ingest_key,
+                reply,
+            } => {
+                let result = ops::complete_observation_ingest(&mut conn, &project_id, &ingest_key);
+                send_or_warn(reply, result, "complete_observation_ingest");
             }
             WriteCmd::InsertHandoff { handoff, reply } => {
                 let result = ops::insert_handoff(&mut conn, &handoff);

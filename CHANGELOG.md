@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The store writer only accepts `Sanitized<NewObservation>`: the privacy
+  strip is enforced by the type system at the persistence boundary, so an
+  unsanitized observation cannot reach disk by construction.
 - The session-review sampler now scores a non-empty `Stop` observation just
   below `PreCompact` (88 vs 90) instead of the low `55` prior, so the opt-in
   assistant/Stop excerpt (a late summary or correction) competes for a sampling
@@ -43,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Code's `--yolo`, and kimi joins the automatic bare-run harness pool.
 
 ### Fixed
+- Native hook spool retries now reuse a per-entry idempotency key, so a lost
+  batch response does not duplicate observations or completed session-end
+  effects. The server claims each key atomically with its observation, resumes
+  downstream wiki/handoff work when a prior delivery stopped incomplete, and
+  skips only events already marked complete. Overlapping deliveries of the same
+  key are serialized; keys are project-scoped and expire after the spool retry
+  horizon.
 - Managed-workstream overview and command-reference documentation now
   consistently includes Kimi Code in the supported and automatic-selection
   harness lists.

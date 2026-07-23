@@ -233,3 +233,46 @@ fn opted_in_non_stop_event_is_inert() {
         "unrelated event body must stay byte-exact"
     );
 }
+
+#[test]
+fn every_spooled_event_carries_a_persistent_ingest_key() {
+    // The idempotency key is minted ONCE at spool time and baked into the
+    // entry's URL: every retry of that entry re-sends the same key, so the
+    // server can recognize a replay whose previous delivery succeeded but
+    // whose response was lost. Distinct events must carry distinct keys.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let payload = br#"{"session_id":"idem","cwd":"/tmp/p","tool_name":"Read"}"#;
+
+    let extract_key = |url: &str| -> String {
+        url.split("ingest_key=")
+            .nth(1)
+            .and_then(|tail| tail.split('&').next())
+            .unwrap_or_else(|| panic!("ingest_key missing from spooled url: {url}"))
+            .to_string()
+    };
+
+    assert!(run_hook(tmp.path(), payload).status.success());
+    assert!(run_hook(tmp.path(), payload).status.success());
+
+    let entries = spool_entries(tmp.path());
+    assert_eq!(entries.len(), 2);
+    let keys: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let entry: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(e.path()).expect("read spool entry"))
+                    .expect("parse spool entry");
+            extract_key(entry["url"].as_str().expect("spooled url"))
+        })
+        .collect();
+    for key in &keys {
+        assert!(
+            (1..=64).contains(&key.len())
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "key must pass server-side validation: {key:?}"
+        );
+    }
+    assert_ne!(keys[0], keys[1], "distinct events must mint distinct keys");
+}

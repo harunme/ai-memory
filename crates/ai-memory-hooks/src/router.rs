@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use ai_memory_consolidate::Consolidator;
 use ai_memory_core::{
@@ -18,7 +18,7 @@ use ai_memory_core::{
     NewObservation, NewSession, ObservationKind, ProjectId, Sanitized, Sanitizer, SessionId,
     WorkspaceId, WorkstreamEvent, WorkstreamEventKind,
 };
-use ai_memory_store::WriterHandle;
+use ai_memory_store::{IngestObservationOutcome, WriterHandle};
 use ai_memory_wiki::Wiki;
 use axum::Json;
 use axum::Router;
@@ -48,6 +48,12 @@ use crate::synth::synthesize_session_page;
 /// callers can drop or retry instead of growing memory without bound.
 pub const DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT: usize = 1024;
 
+/// Maximum keyed-ingest gates retained before dead weak entries are pruned.
+///
+/// Live gates are bounded by the global ingest semaphore; dead entries carry
+/// no mutex allocation and are removed opportunistically.
+pub const DEFAULT_INGEST_GATE_MAX_ENTRIES: usize = 4096;
+
 /// Maximum events accepted in one `POST /hook/batch` request. This matches the
 /// client drain cap so a single request cannot monopolize ingest capacity or
 /// allocate/process an unbounded vector of hook events.
@@ -69,6 +75,40 @@ pub type ProjectCacheKey = (String, String, String, String);
 
 /// Shared bounded resolved-project cache.
 pub type ProjectCache = Arc<tokio::sync::Mutex<ProjectCacheStore>>;
+
+type IngestGate = tokio::sync::Mutex<()>;
+type IngestGateMap = HashMap<(ProjectId, String), Weak<IngestGate>>;
+
+/// Per-key process gates prevent an overlapping retry from racing the original
+/// delivery's downstream wiki/handoff effects.
+#[derive(Clone, Default)]
+pub struct IngestGates {
+    entries: Arc<tokio::sync::Mutex<IngestGateMap>>,
+}
+
+impl IngestGates {
+    async fn lock(
+        &self,
+        project_id: ProjectId,
+        ingest_key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = {
+            let mut entries = self.entries.lock().await;
+            if entries.len() >= DEFAULT_INGEST_GATE_MAX_ENTRIES {
+                entries.retain(|_, gate| gate.strong_count() > 0);
+            }
+            let map_key = (project_id, ingest_key.to_owned());
+            if let Some(gate) = entries.get(&map_key).and_then(Weak::upgrade) {
+                gate
+            } else {
+                let gate = Arc::new(IngestGate::new(()));
+                entries.insert(map_key, Arc::downgrade(&gate));
+                gate
+            }
+        };
+        gate.lock_owned().await
+    }
+}
 
 /// Bounded cwd-resolution cache used by the hook router.
 #[derive(Debug)]
@@ -399,6 +439,9 @@ pub struct HookState {
     /// In-flight hook processing limiter. Requests acquire one permit before
     /// spawning work and return 429 immediately when saturated.
     pub ingest_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Project/key gates that serialize an original delivery with an
+    /// overlapping retry until the first processor marks completion or exits.
+    pub ingest_gates: IngestGates,
     /// Per-source ingest rate limiter. The global `ingest_semaphore` is acquired
     /// first for stored events so globally rejected events do not spend source
     /// tokens. Disabled (pass-through) unless configured by the CLI.
@@ -1992,7 +2035,34 @@ async fn process(
     // below wants the scrubbed title, so keep a copy before the move.
     let sanitized = Sanitized::new(raw_obs, &state.sanitizer);
     let log_title = sanitized.inner().title.clone();
-    let _ = state.writer.insert_observation(sanitized).await?;
+    // A keyed event claims its project-scoped key in the same transaction as
+    // the observation. A pending replay resumes the downstream wiki/handoff
+    // effects without duplicating the observation; only a delivery whose
+    // effects were marked complete is skipped.
+    let ingest_key = env.ingest_key.clone();
+    let _ingest_guard = if let Some(key) = ingest_key.as_deref() {
+        Some(state.ingest_gates.lock(proj, key).await)
+    } else {
+        None
+    };
+    if let Some(key) = ingest_key.as_ref() {
+        match state
+            .writer
+            .insert_observation_ingest(sanitized, key.clone())
+            .await?
+        {
+            IngestObservationOutcome::Inserted(_) => {}
+            IngestObservationOutcome::ResumePending => {
+                debug!(key, "resuming incomplete keyed hook event");
+            }
+            IngestObservationOutcome::AlreadyComplete => {
+                debug!(key, "completed ingest_key replay; skipping event");
+                return Ok(());
+            }
+        }
+    } else {
+        let _ = state.writer.insert_observation(sanitized).await?;
+    }
 
     // Append the log line to the per-project log.md.
     if let Err(e) = log::append_event(
@@ -2118,6 +2188,10 @@ async fn process(
                 "managed session ended; summary page written without duplicate legacy handoff",
             );
         }
+    }
+
+    if let Some(key) = ingest_key {
+        state.writer.complete_observation_ingest(proj, key).await?;
     }
 
     Ok(())
@@ -2381,6 +2455,7 @@ mod tests {
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
             )),
+            ingest_gates: IngestGates::default(),
         }
     }
 
@@ -2678,6 +2753,190 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "marker-file overrides must still rescope"
+        );
+    }
+
+    /// Completed replays are skipped, while a claim left pending after the
+    /// observation commit resumes and completes its downstream processing.
+    /// Fresh keys and keyless older clients keep landing normally.
+    #[tokio::test]
+    async fn replayed_ingest_key_does_not_duplicate_observation() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "55555555-5555-5555-5555-555555555555";
+        let cwd = tmp.path().join("idem");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    ingest_key: key.map(str::to_string),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": sid,
+                    "cwd": cwd.to_string_lossy(),
+                    "prompt": "hello",
+                }),
+            )
+        };
+
+        process(&state, fire("session-start", None), None)
+            .await
+            .unwrap();
+
+        // Simulate a process stopping after the atomic observation/key claim
+        // but before downstream effects. The replay must resume and complete.
+        let session_id: SessionId = sid.parse().unwrap();
+        let (ws, proj, _) = state
+            .reader
+            .find_session_scope(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let pending_obs = || {
+            Sanitized::new(
+                NewObservation {
+                    session_id,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind: ObservationKind::UserPrompt,
+                    extension: None,
+                    source_event: None,
+                    title: "pending replay".into(),
+                    body: "hello".into(),
+                    importance: 8,
+                },
+                &state.sanitizer,
+            )
+        };
+        let pending = state
+            .writer
+            .insert_observation_ingest(pending_obs(), "entry-pending".into())
+            .await
+            .unwrap();
+        assert!(matches!(pending, IngestObservationOutcome::Inserted(_)));
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-pending")),
+            None,
+        )
+        .await
+        .unwrap();
+        let completed = state
+            .writer
+            .insert_observation_ingest(pending_obs(), "entry-pending".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            completed,
+            IngestObservationOutcome::AlreadyComplete,
+            "resumed processing must mark the key complete"
+        );
+
+        // First delivery lands; the byte-identical replay is skipped.
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-abc123")),
+            None,
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-abc123")),
+            None,
+        )
+        .await
+        .unwrap();
+        // A different key is a new event, not a replay.
+        process(
+            &state,
+            fire("user-prompt-submit", Some("entry-def456")),
+            None,
+        )
+        .await
+        .unwrap();
+        // Keyless events (older clients) keep at-least-once behavior.
+        process(&state, fire("user-prompt-submit", None), None)
+            .await
+            .unwrap();
+        process(&state, fire("user-prompt-submit", None), None)
+            .await
+            .unwrap();
+
+        let observations = state
+            .reader
+            .observations_for_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            observations.len(),
+            6,
+            "session-start + resumed pending + first keyed + fresh key + 2 keyless"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_session_end_replay_does_not_duplicate_handoff() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "66666666-6666-6666-6666-666666666666";
+        let cwd = tmp.path().join("session-end-idem");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let fire = |event: &str, key: Option<&str>| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    ingest_key: key.map(str::to_string),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": sid,
+                    "cwd": cwd.to_string_lossy(),
+                    "prompt": "finish cleanly",
+                }),
+            )
+        };
+
+        process(&state, fire("session-start", None), None)
+            .await
+            .unwrap();
+        process(&state, fire("user-prompt-submit", None), None)
+            .await
+            .unwrap();
+        let session_id: SessionId = sid.parse().unwrap();
+        let (ws, proj, _) = state
+            .reader
+            .find_session_scope(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = fire("session-end", Some("entry-session-end"));
+        let overlapping_retry = fire("session-end", Some("entry-session-end"));
+        let (first_result, retry_result) = tokio::join!(
+            process(&state, first, None),
+            process(&state, overlapping_retry, None)
+        );
+        first_result.unwrap();
+        retry_result.unwrap();
+
+        let briefing = state
+            .reader
+            .briefing_for_project(ws, proj, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            briefing.pending_handoff_count, 1,
+            "completed replay must not add a handoff"
+        );
+        assert_eq!(
+            briefing.counts.observations, 3,
+            "session-start + prompt + one session-end observation"
         );
     }
 
