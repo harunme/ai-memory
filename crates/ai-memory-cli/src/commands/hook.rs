@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use ai_memory_core::{AgentKind, ManagedRunId, SessionId};
 use ai_memory_hooks::capture_policy::metadata_only_body;
-use ai_memory_hooks::{CaptureDisposition, PolicyState};
+use ai_memory_hooks::{CaptureDisposition, HookEvent, PolicyState};
 use ai_memory_llm::OidcToken;
 
 use crate::cli::HookArgs;
@@ -497,7 +497,10 @@ where
     // into the turn verbatim as a `hook_result` user message. The payload
     // carries the native `sessionId`, so the destructive GET can also link
     // the managed run to the native session, same as session-start does.
-    if args.event == "user-prompt"
+    // The installed kimi hook passes the script stem (`user-prompt-submit`)
+    // while the legacy shell path posts `user-prompt`; HookEvent::parse
+    // canonicalizes both (and the snake/native spellings) to UserPrompt.
+    if HookEvent::parse(&args.event) == HookEvent::UserPrompt
         && AgentKind::from_wire(&args.agent).user_prompt_injects_handoff()
     {
         let client = build_client();
@@ -1512,6 +1515,47 @@ mod tests {
         // The native session id rides along so the destructive fetch can link
         // the managed run to the kimi session.
         assert!(request.contains("session_id=session_abc"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn kimi_user_prompt_submit_stem_also_delivers_the_handoff() {
+        // The default PosixNative/WindowsNative installs pass the script stem
+        // (`--event user-prompt-submit`), not the legacy `user-prompt` token;
+        // both must trigger delivery or the production path would print `{}`
+        // and kimi would inject it as literal context.
+        let tmp = tempfile::tempdir().unwrap();
+        let (base, mut requests) = serve_requests("200 OK", "AMWS-HANDOFF-DELTA").await;
+        let mut stdout = Vec::new();
+        run_with_payload(
+            Some(tmp.path().to_path_buf()),
+            kimi_hook_args("user-prompt-submit", &base),
+            serde_json::json!({"sessionId": "session_abc", "cwd": tmp.path(), "prompt": "hi"})
+                .to_string(),
+            &mut stdout,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stdout, b"AMWS-HANDOFF-DELTA\n");
+        let request = first_request(&mut requests).await.unwrap();
+        assert!(request.starts_with("GET /handoff?"), "{request}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (base, mut requests) = serve_requests("404 Not Found", "").await;
+        let mut stdout = Vec::new();
+        run_with_payload(
+            Some(tmp.path().to_path_buf()),
+            kimi_hook_args("user-prompt-submit", &base),
+            serde_json::json!({"sessionId": "session_abc", "cwd": tmp.path(), "prompt": "hi"})
+                .to_string(),
+            &mut stdout,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let request = first_request(&mut requests).await.unwrap();
+        assert!(request.starts_with("GET /handoff?"), "{request}");
+        assert_eq!(stdout, b"");
     }
 
     #[tokio::test]

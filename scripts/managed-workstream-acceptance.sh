@@ -359,11 +359,14 @@ mkdir -p "$KIMI_FAKE_HOME"
     "$BIN" --data-dir "$DATA" run --new edge-kimi --executable "$FAKE" \
       kimi >"$LOGS/edge-kimi-first.log" 2>&1
 )
-[ ! -s "$TMP/kimi-first-argv.log" ] || {
+# The fake echoes one line per argv element, so a zero-argument fresh launch
+# leaves a single empty line in the log; assert no real argument arrived
+# rather than asserting the file is byte-empty.
+if grep -q . "$TMP/kimi-first-argv.log"; then
   printf 'fresh kimi launch unexpectedly received a session selector\n' >&2
   cat "$TMP/kimi-first-argv.log" >&2
   exit 1
-}
+fi
 kimi_session_dir=$(find "$KIMI_FAKE_HOME/sessions" -mindepth 2 -maxdepth 2 -type d -print -quit)
 [ -n "$kimi_session_dir" ] || {
   printf 'fake kimi did not create a native session store\n' >&2
