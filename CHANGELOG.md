@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Code's `--yolo`, and kimi joins the automatic bare-run harness pool.
 
 ### Fixed
+- Native hook spool retries now reuse a per-entry idempotency key, so a lost
+  batch response does not duplicate observations or completed session-end
+  effects. The server claims each key atomically with its observation, resumes
+  downstream wiki/handoff work when a prior delivery stopped incomplete, and
+  skips only events already marked complete. Overlapping deliveries of the same
+  key are serialized; keys are project-scoped and expire after the spool retry
+  horizon.
 - Managed-workstream overview and command-reference documentation now
   consistently includes Kimi Code in the supported and automatic-selection
   harness lists.

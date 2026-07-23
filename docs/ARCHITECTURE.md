@@ -47,7 +47,8 @@ from hook paths.
 1. Agent CLI emits a lifecycle hook (SessionStart, UserPromptSubmit,
    PostToolUse, …). Shell-script hooks `curl` event JSON to `POST /hook`
    with a short timeout. Native `ai-memory hook --event ...` commands spool
-   events locally, do a short bounded cleanup at session start, and hand
+   events locally with a stable per-entry idempotency key, do a short bounded
+   cleanup at session start, and hand
    session-end delivery to a detached lock-aware `hook-drain` helper;
    high-latency operators can raise the drain/handoff/background caps with
    minute-based env vars.
@@ -59,8 +60,16 @@ from hook paths.
    storage. See [Capture exclusions](marker-file.md#capture-exclusions).
 2. Server's hook router sanitises the payload (the only path from
    untrusted text into the store), assigns an [`ObservationKind`], and
-   enqueues a `WriteCmd` to the writer actor. `log.md` gets an
-   appended `## [YYYY-MM-DDTHH:MM:SSZ] <event> | <title>` line.
+   enqueues a `WriteCmd` to the writer actor. For native keyed events, the
+   project-scoped key and observation commit together. The key is marked
+   complete only after downstream processing: an incomplete replay resumes
+   wiki/handoff effects without another observation, while a completed replay
+   is acknowledged and skipped. A bounded per-project/key gate serializes an
+   overlapping retry with the original processor. Downstream effects remain
+   at-least-once until that completion marker, so a process crash during those
+   effects may repeat an already applied effect rather than silently lose the
+   rest. `log.md` gets an appended
+   `## [YYYY-MM-DDTHH:MM:SSZ] <event> | <title>` line.
 3. On true `SessionEnd` events, the server synthesises a
    `sessions/<id>.md` summary page (rule-based, no LLM) and opens a
    `Handoff` row for the next agent. Auto-commits the wiki. Clients

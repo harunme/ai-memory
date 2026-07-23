@@ -438,6 +438,12 @@ Native `ai-memory hook --event ...` commands spool events locally. Session start
 does a short bounded cleanup drain before fetching a handoff; cancellation-prone
 boundary events (`stop`, `pre-compact`, and `session-end`) start a detached
 `hook-drain` helper so delivery does not depend on one shutdown hook surviving.
+Each spooled entry keeps one idempotency key across retries. A server that
+processed an event but lost the batch response will not duplicate its
+observation or completed session-end effects; if processing stopped after the
+observation commit, the retry re-runs downstream wiki/handoff work. Those
+incomplete effects remain at-least-once until the server marks the event
+complete.
 On Unix, the helper uses a trusted `setsid` launcher when available and falls
 back to a separate process group otherwise; Windows uses detached/breakaway
 process flags. The spool is capped, so a permanently undrained backlog is
