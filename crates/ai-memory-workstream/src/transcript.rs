@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufRead as _, BufReader, Seek as _, SeekFrom};
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,11 @@ pub struct ExportedTranscript {
 struct FileCursor {
     path: String,
     offset: u64,
+    /// Hash of every committed byte through `offset`. Kimi Code can rewrite
+    /// its journal in place, so its adapter validates this prefix before
+    /// trusting the byte offset. Other JSONL adapters remain offset-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefix_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -199,7 +204,23 @@ fn export_jsonl(
     let mut file = File::open(path)
         .with_context(|| format!("opening native transcript {}", path.display()))?;
     let len = file.metadata()?.len();
-    let start = cursor.map_or(0, |cursor| cursor.offset.min(len));
+    let (start, mut kimi_prefix_hasher) = if harness == ManagedHarness::Kimi {
+        let validated = if let Some(cursor) = cursor.as_ref().filter(|cursor| cursor.offset <= len)
+            && let Some(expected) = cursor.prefix_sha256.as_deref()
+            && let Some(hasher) = hash_file_prefix(&mut file, cursor.offset)?
+            && format!("{:x}", hasher.clone().finalize()) == expected
+        {
+            Some((cursor.offset, hasher))
+        } else {
+            None
+        };
+        validated.unwrap_or_else(|| (0, Sha256::new()))
+    } else {
+        (
+            cursor.map_or(0, |cursor| cursor.offset.min(len)),
+            Sha256::new(),
+        )
+    };
     file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file);
     let mut offset = start;
@@ -217,6 +238,9 @@ fn export_jsonl(
         if !line.ends_with(b"\n") {
             break;
         }
+        if harness == ManagedHarness::Kimi {
+            kimi_prefix_hasher.update(&line);
+        }
         committed_offset = offset;
         let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
@@ -228,8 +252,17 @@ fn export_jsonl(
                 continue;
             }
         };
-        let record_id =
-            source_id(&value).unwrap_or_else(|| format!("byte-{}", offset - read as u64));
+        let record_id = if harness == ManagedHarness::Kimi {
+            // Kimi wire records carry no envelope id, and the journal is
+            // rewritten wholesale on fork/compaction/resume — a byte-offset
+            // id would silently change meaning. Hashing the raw line keeps
+            // record ids (and therefore server-side event dedup) stable
+            // across rewrites.
+            let raw = line.strip_suffix(b"\n").unwrap_or(&line);
+            format!("{:x}", Sha256::digest(raw))
+        } else {
+            source_id(&value).unwrap_or_else(|| format!("byte-{}", offset - read as u64))
+        };
         match harness {
             ManagedHarness::Claude => parse_claude(
                 &value,
@@ -253,6 +286,13 @@ fn export_jsonl(
                 &mut events,
                 &mut losses,
             ),
+            ManagedHarness::Kimi => parse_kimi(
+                &value,
+                native_session_id,
+                &record_id,
+                &mut events,
+                &mut losses,
+            ),
             ManagedHarness::OpenCode | ManagedHarness::Crush => {
                 return Err(anyhow!(
                     "{} transcripts must use their SQLite adapter",
@@ -261,15 +301,37 @@ fn export_jsonl(
             }
         }
     }
+    if harness == ManagedHarness::Kimi {
+        annotate_kimi_subagents(path, &mut losses);
+    }
     Ok(ExportedTranscript {
         native_session_id: native_session_id.to_string(),
         source_cursor: Some(serde_json::to_string(&FileCursor {
             path: path.to_string_lossy().into_owned(),
             offset: committed_offset,
+            prefix_sha256: (harness == ManagedHarness::Kimi)
+                .then(|| format!("{:x}", kimi_prefix_hasher.finalize())),
         })?),
         events,
         losses: deduplicate_losses(losses),
     })
+}
+
+fn hash_file_prefix(file: &mut File, len: u64) -> Result<Option<Sha256>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut remaining = len;
+    let mut buffer = [0_u8; 16 * 1024];
+    while remaining > 0 {
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Ok(None);
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(Some(hasher))
 }
 
 fn parse_claude(
@@ -520,6 +582,332 @@ fn parse_pi_family(
             );
         }
         _ => {}
+    }
+}
+
+/// Kimi Code wire journal (`agents/main/wire.jsonl`): flat records
+/// `{type, time?, ...payload}`. `context.append_message` stores user messages
+/// and legacy/imported conversation records; native assistant output and tool
+/// exchanges are recorded as `context.append_loop_event`. Records like
+/// `config.update`/`llm.request` carry private harness data (system prompts,
+/// request bodies) that must never reach the ledger. Unknown record types are
+/// ignored so newer Kimi versions stay forward-compatible.
+fn parse_kimi(
+    value: &Value,
+    session: &str,
+    record_id: &str,
+    events: &mut Vec<NewWorkstreamEvent>,
+    losses: &mut Vec<String>,
+) {
+    let record_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let occurred_at = kimi_timestamp(value);
+    match record_type {
+        "context.append_message" => {
+            let message = value.get("message").unwrap_or(&Value::Null);
+            // A `partial` message is re-appended complete once the stream
+            // finishes; importing the fragment would duplicate it.
+            if message.get("partial").and_then(Value::as_bool) == Some(true) {
+                return;
+            }
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match role {
+                "system" => {
+                    losses.push("Kimi system messages were intentionally excluded".into());
+                }
+                "user" => {
+                    // Only genuine user input is imported. Origin-tagged
+                    // messages are harness-injected context — including our
+                    // own handoff delta (`hook_result`), which would feed the
+                    // ledger back into itself.
+                    let injected = message
+                        .get("origin")
+                        .and_then(|origin| origin.get("kind"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind != "user");
+                    if injected {
+                        losses.push(
+                            "Kimi harness-injected messages were intentionally excluded".into(),
+                        );
+                        return;
+                    }
+                    parse_kimi_parts(
+                        message,
+                        WorkstreamEventKind::Message,
+                        "user",
+                        session,
+                        record_id,
+                        occurred_at,
+                        events,
+                        losses,
+                    );
+                }
+                "assistant" => {
+                    let block_count = parse_kimi_parts(
+                        message,
+                        WorkstreamEventKind::Message,
+                        "assistant",
+                        session,
+                        record_id,
+                        occurred_at.clone(),
+                        events,
+                        losses,
+                    );
+                    let tool_calls = message
+                        .get("toolCalls")
+                        .and_then(Value::as_array)
+                        .map_or(&[][..], Vec::as_slice);
+                    for (index, call) in tool_calls.iter().enumerate() {
+                        let function = call.get("function").unwrap_or(call);
+                        let name = first_string(function, &["name"]).unwrap_or("tool");
+                        // `arguments` is a JSON string; re-serialize it
+                        // compact when it parses, mirroring parse_codex's
+                        // `"{name}: {body}"` tool-call shape.
+                        let arguments = call
+                            .get("arguments")
+                            .or_else(|| function.get("arguments"))
+                            .and_then(Value::as_str)
+                            .map(|raw| match serde_json::from_str::<Value>(raw) {
+                                Ok(parsed) => compact_json(&parsed),
+                                Err(_) => raw.to_string(),
+                            })
+                            .unwrap_or_default();
+                        push_event(
+                            events,
+                            AgentKind::KimiCode,
+                            session,
+                            record_id,
+                            block_count + index,
+                            WorkstreamEventKind::ToolCall,
+                            Some("assistant"),
+                            &format!("{name}: {arguments}"),
+                            occurred_at.clone(),
+                            json!({"tool": name}),
+                        );
+                    }
+                }
+                "tool" => {
+                    let texts = kimi_text_parts(message, losses);
+                    let body = texts.parts.join("\n");
+                    push_event(
+                        events,
+                        AgentKind::KimiCode,
+                        session,
+                        record_id,
+                        0,
+                        WorkstreamEventKind::ToolResult,
+                        Some("tool"),
+                        &body,
+                        occurred_at,
+                        json!({}),
+                    );
+                }
+                _ => {}
+            }
+        }
+        "context.append_loop_event" => {
+            let event = value.get("event").unwrap_or(&Value::Null);
+            match event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "content.part" => {
+                    let part = event.get("part").unwrap_or(&Value::Null);
+                    match part.get("type").and_then(Value::as_str).unwrap_or_default() {
+                        "text" => {
+                            if let Some(text) = first_string(part, &["text", "content"]) {
+                                push_event(
+                                    events,
+                                    AgentKind::KimiCode,
+                                    session,
+                                    record_id,
+                                    0,
+                                    WorkstreamEventKind::Message,
+                                    Some("assistant"),
+                                    text,
+                                    occurred_at,
+                                    json!({}),
+                                );
+                            }
+                        }
+                        "think" | "thinking" => {
+                            losses.push("Kimi hidden reasoning was intentionally excluded".into());
+                        }
+                        _ => {
+                            losses.push(
+                                "Kimi non-text content parts were intentionally excluded".into(),
+                            );
+                        }
+                    }
+                }
+                "tool.call" => {
+                    let name = first_string(event, &["name"]).unwrap_or("tool");
+                    let arguments = event.get("args").map(compact_json).unwrap_or_default();
+                    push_event(
+                        events,
+                        AgentKind::KimiCode,
+                        session,
+                        record_id,
+                        0,
+                        WorkstreamEventKind::ToolCall,
+                        Some("assistant"),
+                        &format!("{name}: {arguments}"),
+                        occurred_at,
+                        json!({
+                            "tool": name,
+                            "tool_call_id": event.get("toolCallId").and_then(Value::as_str)
+                        }),
+                    );
+                }
+                "tool.result" => {
+                    let result = event.get("result").unwrap_or(&Value::Null);
+                    let texts =
+                        kimi_content_parts(result.get("output").unwrap_or(&Value::Null), losses);
+                    push_event(
+                        events,
+                        AgentKind::KimiCode,
+                        session,
+                        record_id,
+                        0,
+                        WorkstreamEventKind::ToolResult,
+                        Some("tool"),
+                        &texts.parts.join("\n"),
+                        occurred_at,
+                        json!({
+                            "tool_call_id": event.get("toolCallId").and_then(Value::as_str),
+                            "is_error": result.get("isError").and_then(Value::as_bool)
+                        }),
+                    );
+                }
+                _ => {}
+            }
+        }
+        "context.apply_compaction" => {
+            if let Some(summary) = value.get("summary").and_then(Value::as_str) {
+                push_event(
+                    events,
+                    AgentKind::KimiCode,
+                    session,
+                    record_id,
+                    0,
+                    WorkstreamEventKind::Compaction,
+                    Some("assistant"),
+                    summary,
+                    occurred_at,
+                    json!({}),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One event per text part of a kimi message; `think` reasoning and media
+/// parts become loss annotations. Returns the number of content parts seen so
+/// callers can index sibling events (tool calls) without collisions.
+#[allow(clippy::too_many_arguments)]
+fn parse_kimi_parts(
+    message: &Value,
+    kind: WorkstreamEventKind,
+    role: &str,
+    session: &str,
+    record_id: &str,
+    occurred_at: Option<String>,
+    events: &mut Vec<NewWorkstreamEvent>,
+    losses: &mut Vec<String>,
+) -> usize {
+    let texts = kimi_text_parts(message, losses);
+    let part_count = texts.part_count;
+    for (index, text) in texts.parts.iter().enumerate() {
+        push_event(
+            events,
+            AgentKind::KimiCode,
+            session,
+            record_id,
+            index,
+            kind,
+            Some(role),
+            text,
+            occurred_at.clone(),
+            json!({}),
+        );
+    }
+    part_count
+}
+
+struct KimiTextParts {
+    parts: Vec<String>,
+    part_count: usize,
+}
+
+/// Collect the visible text of a kimi message's content parts in order,
+/// annotating parts that cannot be imported (hidden reasoning, media).
+fn kimi_text_parts(message: &Value, losses: &mut Vec<String>) -> KimiTextParts {
+    kimi_content_parts(message.get("content").unwrap_or(&Value::Null), losses)
+}
+
+fn kimi_content_parts(content: &Value, losses: &mut Vec<String>) -> KimiTextParts {
+    let parts: Vec<&Value> = content
+        .as_array()
+        .map_or_else(|| vec![content], |items| items.iter().collect());
+    let mut texts = Vec::with_capacity(parts.len());
+    for part in &parts {
+        if let Some(text) = part.as_str() {
+            texts.push(text.to_string());
+            continue;
+        }
+        match part.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = first_string(part, &["text", "content"]) {
+                    texts.push(text.to_string());
+                }
+            }
+            // kosong calls the reasoning part `think`; tolerate `thinking`
+            // for forward compatibility.
+            Some("think" | "thinking") => {
+                losses.push("Kimi hidden reasoning was intentionally excluded".into());
+            }
+            Some(_) => {
+                losses.push("Kimi non-text content parts were intentionally excluded".into());
+            }
+            None => {}
+        }
+    }
+    KimiTextParts {
+        parts: texts,
+        part_count: parts.len(),
+    }
+}
+
+/// Kimi wire envelopes carry `time` as an optional ms epoch; other adapters
+/// keep the harness's native ISO string, so render this one the same way.
+fn kimi_timestamp(value: &Value) -> Option<String> {
+    let millis = value.get("time").and_then(Value::as_i64)?;
+    jiff::Timestamp::from_millisecond(millis)
+        .ok()
+        .map(|timestamp| timestamp.to_string())
+}
+
+/// Subagent journals (`agents/<id != main>/wire.jsonl`) are not imported in
+/// v1; annotate the gap once so the omission is visible in the ledger.
+fn annotate_kimi_subagents(path: &Path, losses: &mut Vec<String>) {
+    let Some(agents_dir) = path.ancestors().nth(2) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(agents_dir) else {
+        return;
+    };
+    let has_subagent = entries
+        .flatten()
+        .any(|entry| entry.file_name() != "main" && entry.path().join("wire.jsonl").is_file());
+    if has_subagent {
+        losses.push("Kimi subagent transcripts were not imported".into());
     }
 }
 
@@ -995,6 +1383,19 @@ fn locate_session_file(
             return Ok(Some(exact));
         }
     }
+    if harness == ManagedHarness::Kimi {
+        // Bucket names are one-way cwd hashes, so only the bucket level can
+        // be enumerated — but the session id below it is a plain directory
+        // name, giving an exact fast path per bucket.
+        if let Ok(buckets) = fs::read_dir(&root) {
+            for bucket in buckets.flatten() {
+                let candidate = bucket.path().join(id).join("agents/main/wire.jsonl");
+                if candidate.is_file() {
+                    return Ok(Some(candidate));
+                }
+            }
+        }
+    }
     let mut files = collect_files(&root, |path| transcript_file(harness, path))?;
     files.sort_by_key(|path| temporary_transcript(path));
     for path in &files {
@@ -1011,6 +1412,16 @@ fn locate_session_file(
 }
 
 fn transcript_file(harness: ManagedHarness, path: &Path) -> bool {
+    if harness == ManagedHarness::Kimi {
+        // Only the main agent's journal: `agents/main/wire.jsonl`. Subagent
+        // wire journals and any other *.jsonl in the store are excluded.
+        return path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
+            && path
+                .parent()
+                .and_then(|dir| dir.file_name())
+                .and_then(|name| name.to_str())
+                == Some("main");
+    }
     path.extension().is_some_and(|ext| ext == "jsonl")
         || matches!(harness, ManagedHarness::Pi | ManagedHarness::Omp) && temporary_transcript(path)
 }
@@ -1024,6 +1435,9 @@ fn temporary_transcript(path: &Path) -> bool {
 }
 
 fn session_header(harness: ManagedHarness, path: &Path) -> Result<Option<(String, PathBuf)>> {
+    if harness == ManagedHarness::Kimi {
+        return kimi_session_header(path);
+    }
     let mut reader = BufReader::new(File::open(path)?);
     let mut line = String::new();
     for _ in 0..64 {
@@ -1050,13 +1464,38 @@ fn session_header(harness: ManagedHarness, path: &Path) -> Result<Option<(String
                 value.get("id").and_then(Value::as_str),
                 value.get("cwd").and_then(Value::as_str),
             ),
-            ManagedHarness::OpenCode | ManagedHarness::Crush => (None, None),
+            ManagedHarness::OpenCode | ManagedHarness::Crush | ManagedHarness::Kimi => (None, None),
         };
         if let (Some(id), Some(cwd)) = (id, cwd) {
             return Ok(Some((id.to_string(), PathBuf::from(cwd))));
         }
     }
     Ok(None)
+}
+
+/// Kimi sessions are self-describing in `<session-dir>/state.json` — the wire
+/// journal itself carries no session id or cwd, and the bucket directory name
+/// is a one-way hash of the cwd, so neither can be inferred from the layout.
+/// The journal path is `<session-dir>/agents/main/wire.jsonl`, making the
+/// session directory the third ancestor. Missing/invalid state means the
+/// session is unusable for checkout matching, not an error.
+fn kimi_session_header(path: &Path) -> Result<Option<(String, PathBuf)>> {
+    let Some(session_dir) = path.ancestors().nth(3) else {
+        return Ok(None);
+    };
+    let Ok(raw) = fs::read_to_string(session_dir.join("state.json")) else {
+        return Ok(None);
+    };
+    let Ok(state) = serde_json::from_str::<Value>(&raw) else {
+        return Ok(None);
+    };
+    let Some(cwd) = state.get("workDir").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(id) = session_dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    Ok(Some((id.to_string(), PathBuf::from(cwd))))
 }
 
 fn discover_opencode(
@@ -1245,6 +1684,7 @@ fn session_root(harness: ManagedHarness, home: &Path, override_dir: Option<&Path
         ManagedHarness::Pi => home.join(".pi/agent/sessions"),
         ManagedHarness::Crush => home.join(".crush"),
         ManagedHarness::Omp => home.join(".omp/agent/sessions"),
+        ManagedHarness::Kimi => home.join(".kimi-code/sessions"),
     }
 }
 
@@ -1402,7 +1842,11 @@ mod tests {
                         "{}\n",
                         json!({"type":"session","id":"other-id","cwd":other})
                     ),
-                    ManagedHarness::OpenCode | ManagedHarness::Crush => unreachable!(),
+                    // Kimi's header lives in state.json, not the journal;
+                    // covered by kimi_discovery_matches_checkout_via_state_json.
+                    ManagedHarness::OpenCode | ManagedHarness::Crush | ManagedHarness::Kimi => {
+                        unreachable!()
+                    }
                 },
             )
             .unwrap();
@@ -1774,5 +2218,321 @@ mod tests {
             export_opencode(home.path(), None, "s1", first.source_cursor.as_deref()).unwrap();
         assert_eq!(second.events.len(), 1);
         assert_eq!(second.events[0].content, "second");
+    }
+
+    /// Build a two-bucket kimi store: `session_a` checked out at `cwd`,
+    /// `session_b` at `other`. Returns `(root, wire_a)`.
+    fn kimi_store_fixture(cwd: &Path, other: &Path) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        for (bucket, id, work_dir) in [
+            ("wd_repo_a1b2c3d4e5f6", "session_aaa", cwd),
+            ("wd_other_f6e5d4c3b2a1", "session_bbb", other),
+        ] {
+            let session_dir = root.path().join(bucket).join(id);
+            fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+            fs::write(
+                session_dir.join("state.json"),
+                json!({"workDir": work_dir}).to_string(),
+            )
+            .unwrap();
+        }
+        let wire_a = root
+            .path()
+            .join("wd_repo_a1b2c3d4e5f6/session_aaa/agents/main/wire.jsonl");
+        (root, wire_a)
+    }
+
+    #[tokio::test]
+    async fn kimi_discovery_matches_checkout_via_state_json_not_bucket_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let (root, wire_a) = kimi_store_fixture(&cwd, &other);
+        fs::write(
+            &wire_a,
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        )
+        .unwrap();
+        let wire_b = root
+            .path()
+            .join("wd_other_f6e5d4c3b2a1/session_bbb/agents/main/wire.jsonl");
+        fs::write(&wire_b, "").unwrap();
+        // The "other" bucket is alphabetically first and its session newer,
+        // so only an exact workDir match can pick the right session.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&wire_b, "{\"type\":\"metadata\"}\n").unwrap();
+
+        let sessions = list_native_sessions(
+            ManagedHarness::Kimi,
+            temp.path(),
+            &cwd,
+            Some(root.path()),
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].native_session_id, "session_aaa");
+
+        let other_sessions = list_native_sessions(
+            ManagedHarness::Kimi,
+            temp.path(),
+            &other,
+            Some(root.path()),
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(other_sessions.len(), 1);
+        assert_eq!(other_sessions[0].native_session_id, "session_bbb");
+
+        let found = locate_session_file(
+            ManagedHarness::Kimi,
+            temp.path(),
+            &cwd,
+            Some(root.path()),
+            "session_bbb",
+        )
+        .unwrap();
+        assert_eq!(found.as_deref(), Some(wire_b.as_path()));
+    }
+
+    #[test]
+    fn kimi_export_maps_visible_records_and_excludes_private_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let session_dir = temp.path().join("store/wd_repo_a1b2c3d4e5f6/session_aaa");
+        fs::create_dir_all(session_dir.join("agents/main")).unwrap();
+        fs::write(
+            session_dir.join("state.json"),
+            json!({"workDir": cwd}).to_string(),
+        )
+        .unwrap();
+        let wire = session_dir.join("agents/main/wire.jsonl");
+        let lines = [
+            json!({"type":"context.append_message","time":1_700_000_000_000_i64,"message":{"role":"user","content":[{"type":"text","text":"hello kimi"}]}}),
+            json!({"type":"context.append_message","message":{"role":"user","origin":{"kind":"hook_result","event":"UserPromptSubmit"},"content":[{"type":"text","text":"injected handoff delta"}]}}),
+            json!({"type":"context.append_message","message":{"role":"user","origin":{"kind":"injection","variant":"todo"},"content":[{"type":"text","text":"injected todo"}]}}),
+            json!({"type":"context.append_message","message":{"role":"system","content":[{"type":"text","text":"private system prompt"}]}}),
+            json!({"type":"context.append_message","message":{"role":"assistant","content":[{"type":"think","think":"private reasoning"},{"type":"text","text":"visible answer"}],"toolCalls":[{"type":"function","id":"call_1","function":{"name":"bash","arguments":"{\"cmd\": \"ls\"}"}}]}}),
+            json!({"type":"context.append_message","message":{"role":"tool","toolCallId":"call_1","content":[{"type":"text","text":"result ok"}]}}),
+            json!({"type":"context.append_message","message":{"role":"assistant","partial":true,"content":[{"type":"text","text":"stream fragment"}]}}),
+            json!({"type":"context.apply_compaction","summary":"compact summary","compactedCount":4}),
+            json!({"type":"context.append_loop_event","event":{"type":"content.part","uuid":"part-think","stepUuid":"step-1","part":{"type":"think","think":"private loop reasoning"}}}),
+            json!({"type":"context.append_loop_event","event":{"type":"content.part","uuid":"part-text","stepUuid":"step-1","part":{"type":"text","text":"loop visible answer"}}}),
+            json!({"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"call-2","stepUuid":"step-1","toolCallId":"call_2","name":"Read","args":{"path":"README.md"}}}),
+            json!({"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"call-2","toolCallId":"call_2","result":{"output":[{"type":"text","text":"loop result ok"}],"isError":false}}}),
+            json!({"type":"config.update","systemPrompt":"never copied"}),
+            json!({"type":"turn.prompt","text":"duplicate projection"}),
+        ];
+        let raw: String = lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        fs::write(&wire, &raw).unwrap();
+
+        let export = export_jsonl(ManagedHarness::Kimi, &wire, "session_aaa", None).unwrap();
+        let kinds: Vec<_> = export.events.iter().map(|event| event.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                WorkstreamEventKind::Message,
+                WorkstreamEventKind::Message,
+                WorkstreamEventKind::ToolCall,
+                WorkstreamEventKind::ToolResult,
+                WorkstreamEventKind::Compaction,
+                WorkstreamEventKind::Message,
+                WorkstreamEventKind::ToolCall,
+                WorkstreamEventKind::ToolResult,
+            ]
+        );
+        assert_eq!(export.events[0].content, "hello kimi");
+        assert_eq!(export.events[0].role.as_deref(), Some("user"));
+        assert_eq!(
+            export.events[0].occurred_at.as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+        assert_eq!(export.events[1].content, "visible answer");
+        assert_eq!(export.events[2].content, "bash: {\"cmd\":\"ls\"}");
+        assert_eq!(export.events[2].metadata["tool"], "bash");
+        assert_eq!(export.events[3].role.as_deref(), Some("tool"));
+        assert_eq!(export.events[4].content, "compact summary");
+        assert_eq!(export.events[5].content, "loop visible answer");
+        assert_eq!(export.events[6].content, "Read: {\"path\":\"README.md\"}");
+        assert_eq!(export.events[6].metadata["tool"], "Read");
+        assert_eq!(export.events[6].metadata["tool_call_id"], "call_2");
+        assert_eq!(export.events[7].content, "loop result ok");
+        assert_eq!(export.events[7].metadata["is_error"], false);
+        assert!(
+            export
+                .events
+                .iter()
+                .all(|event| !event.content.contains("injected")
+                    && !event.content.contains("private")
+                    && !event.content.contains("stream fragment")
+                    && !event.content.contains("duplicate")),
+            "{:?}",
+            export.events.iter().map(|e| &e.content).collect::<Vec<_>>()
+        );
+        for expected in ["harness-injected", "system messages", "hidden reasoning"] {
+            assert!(
+                export.losses.iter().any(|loss| loss.contains(expected)),
+                "missing loss {expected}: {:?}",
+                export.losses
+            );
+        }
+
+        // Record ids are the sha256 of the raw journal line, stable across
+        // whole-file rewrites (fork/compaction/resume rewrites the journal).
+        let first_line = raw.lines().next().unwrap();
+        assert_eq!(
+            export.events[0].source_record_id.as_deref(),
+            Some(format!("{:x}", Sha256::digest(first_line.as_bytes())).as_str())
+        );
+        fs::write(&wire, &raw).unwrap();
+        let reimport = export_jsonl(ManagedHarness::Kimi, &wire, "session_aaa", None).unwrap();
+        let ids: Vec<_> = export.events.iter().map(|event| &event.event_id).collect();
+        let reids: Vec<_> = reimport
+            .events
+            .iter()
+            .map(|event| &event.event_id)
+            .collect();
+        assert_eq!(ids, reids, "event ids must survive journal rewrites");
+    }
+
+    #[test]
+    fn kimi_export_is_incremental_and_tolerates_an_unfinished_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let wire = temp
+            .path()
+            .join("store/bucket/session_x/agents/main/wire.jsonl");
+        fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let first = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"one\"}]}}";
+        let second = "{\"type\":\"context.append_message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}]}}";
+        fs::write(&wire, format!("{first}\n{{\"type\":")).unwrap();
+
+        let initial = export_jsonl(ManagedHarness::Kimi, &wire, "session_x", None).unwrap();
+        assert_eq!(initial.events.len(), 1);
+        let cursor: FileCursor =
+            serde_json::from_str(initial.source_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(cursor.offset, first.len() as u64 + 1);
+        assert!(cursor.prefix_sha256.is_some());
+
+        fs::write(&wire, format!("{first}\n{second}\n")).unwrap();
+        let incremental = export_jsonl(
+            ManagedHarness::Kimi,
+            &wire,
+            "session_x",
+            Some(&serde_json::to_string(&cursor).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(incremental.events.len(), 1);
+        assert_eq!(incremental.events[0].content, "two");
+    }
+
+    #[test]
+    fn kimi_export_resets_cursor_after_an_in_place_journal_rewrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let wire = temp
+            .path()
+            .join("store/bucket/session_x/agents/main/wire.jsonl");
+        fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        let message = |role: &str, text: &str| {
+            json!({
+                "type": "context.append_message",
+                "message": {
+                    "role": role,
+                    "content": [{"type": "text", "text": text}],
+                },
+            })
+            .to_string()
+        };
+        let first = message("user", "one");
+        let second = message("assistant", "two");
+        fs::write(&wire, format!("{first}\n{second}\n")).unwrap();
+
+        let initial = export_jsonl(ManagedHarness::Kimi, &wire, "session_x", None).unwrap();
+        let initial_ids: Vec<_> = initial
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect();
+        let inserted = message(
+            "user",
+            "a rewritten prefix whose different byte length invalidates the old offset",
+        );
+        let third = message("assistant", "three");
+        fs::write(&wire, format!("{inserted}\n{first}\n{second}\n{third}\n")).unwrap();
+
+        let rewritten = export_jsonl(
+            ManagedHarness::Kimi,
+            &wire,
+            "session_x",
+            initial.source_cursor.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten
+                .events
+                .iter()
+                .map(|event| event.content.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "a rewritten prefix whose different byte length invalidates the old offset",
+                "one",
+                "two",
+                "three",
+            ]
+        );
+        assert_eq!(rewritten.events[1].event_id, initial_ids[0]);
+        assert_eq!(rewritten.events[2].event_id, initial_ids[1]);
+    }
+
+    #[test]
+    fn kimi_export_annotates_unimported_subagent_journals() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("store/bucket/session_x");
+        let main = session_dir.join("agents/main/wire.jsonl");
+        fs::create_dir_all(main.parent().unwrap()).unwrap();
+        fs::write(
+            &main,
+            "{\"type\":\"context.append_message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        )
+        .unwrap();
+
+        let without = export_jsonl(ManagedHarness::Kimi, &main, "session_x", None).unwrap();
+        assert!(!without.losses.iter().any(|loss| loss.contains("subagent")));
+
+        let sub = session_dir.join("agents/sub-1/wire.jsonl");
+        fs::create_dir_all(sub.parent().unwrap()).unwrap();
+        fs::write(&sub, "{\"type\":\"context.append_message\"}\n").unwrap();
+        let with = export_jsonl(ManagedHarness::Kimi, &main, "session_x", None).unwrap();
+        assert!(
+            with.losses
+                .iter()
+                .any(|loss| loss.contains("subagent transcripts were not imported")),
+            "{:?}",
+            with.losses
+        );
+        // The subagent journal itself is never picked up as a transcript.
+        assert!(!transcript_file(ManagedHarness::Kimi, &sub));
+        assert!(transcript_file(ManagedHarness::Kimi, &main));
+    }
+
+    #[test]
+    fn kimi_adapter_excludes_non_conversation_roles_like_other_adapters() {
+        let value = json!({
+            "type":"context.append_message",
+            "message":{"role":"system","content":[{"type":"text","text":"private Kimi instructions"}]}
+        });
+        let mut events = Vec::new();
+        let mut losses = Vec::new();
+        parse_kimi(&value, "session", "record", &mut events, &mut losses);
+        assert!(events.is_empty());
+        assert_eq!(losses, ["Kimi system messages were intentionally excluded"]);
     }
 }

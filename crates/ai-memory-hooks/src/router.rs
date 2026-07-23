@@ -1068,8 +1068,10 @@ async fn fetch_and_accept_handoff(
             );
             return Ok(None);
         }
+        let brief_md =
+            resolve_requested_session_brief(state, &query, actor_user.as_deref()).await?;
         if context.context_delivered {
-            return Ok(None);
+            return Ok(brief_md);
         }
         let rendered = render_managed_context(
             &context.events,
@@ -1078,7 +1080,7 @@ async fn fetch_and_accept_handoff(
             context.sync_after,
         );
         let _ = state.writer.accept_managed_run_context(run_id).await?;
-        return Ok(rendered);
+        return Ok(combine_handoff_and_brief(rendered, brief_md));
     }
     // `/handoff` has no session_id in the request — `per_session` mode
     // therefore falls back to the single slot (graceful degradation),
@@ -1102,7 +1104,7 @@ async fn fetch_and_accept_handoff(
     let handoff_md = {
         let handoff = state
             .reader
-            .latest_open_handoff(ws, proj, query.cwd)
+            .latest_open_handoff(ws, proj, query.cwd.clone())
             .await?;
         match handoff {
             Some(h) => {
@@ -1115,27 +1117,72 @@ async fn fetch_and_accept_handoff(
     // The brief is additive and non-destructive: unlike the handoff (a
     // single-use slot consumed above), it is recomposed on every opted-in
     // session start — exactly what a Claude Code `/clear` needs (#176).
-    let brief_md = if crate::payload::query_flag_truthy(query.briefing.as_deref()) {
-        let budget = query
-            .briefing_budget
-            .as_deref()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(BRIEF_BUDGET_DEFAULT)
-            .clamp(BRIEF_BUDGET_MIN, BRIEF_BUDGET_MAX);
-        let (core, recent) = state
-            .reader
-            .session_brief_pages(ws, proj, BRIEF_CORE_PAGES_LIMIT, BRIEF_RECENT_PAGES_LIMIT)
-            .await?;
-        render_session_brief(&core, &recent, budget)
-    } else {
-        None
+    let brief_md = render_requested_session_brief(state, &query, ws, proj).await?;
+    Ok(combine_handoff_and_brief(handoff_md, brief_md))
+}
+
+async fn resolve_requested_session_brief(
+    state: &HookState,
+    query: &HandoffQuery,
+    actor_user: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if !crate::payload::query_flag_truthy(query.briefing.as_deref()) {
+        return Ok(None);
+    }
+    let actor_key = ai_memory_core::ActorKey {
+        user: actor_user.map(str::to_owned),
+        session_id: None,
     };
-    Ok(match (handoff_md, brief_md) {
+    let (ws, proj) = resolve_project_ids_inner(
+        state,
+        query.cwd.as_deref(),
+        query.workspace.as_deref(),
+        query.project.as_deref(),
+        ProjectStrategy::parse(query.project_strategy.as_deref()),
+        &actor_key,
+        false,
+    )
+    .await?;
+    render_requested_session_brief(state, query, ws, proj).await
+}
+
+async fn render_requested_session_brief(
+    state: &HookState,
+    query: &HandoffQuery,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+) -> anyhow::Result<Option<String>> {
+    if !crate::payload::query_flag_truthy(query.briefing.as_deref()) {
+        return Ok(None);
+    }
+    let budget = query
+        .briefing_budget
+        .as_deref()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(BRIEF_BUDGET_DEFAULT)
+        .clamp(BRIEF_BUDGET_MIN, BRIEF_BUDGET_MAX);
+    let (core, recent) = state
+        .reader
+        .session_brief_pages(
+            workspace_id,
+            project_id,
+            BRIEF_CORE_PAGES_LIMIT,
+            BRIEF_RECENT_PAGES_LIMIT,
+        )
+        .await?;
+    Ok(render_session_brief(&core, &recent, budget))
+}
+
+fn combine_handoff_and_brief(
+    handoff_md: Option<String>,
+    brief_md: Option<String>,
+) -> Option<String> {
+    match (handoff_md, brief_md) {
         (Some(h), Some(b)) => Some(format!("{h}\n{b}")),
         (Some(h), None) => Some(h),
         (None, Some(b)) => Some(b),
         (None, None) => None,
-    })
+    }
 }
 
 /// Default char budget for the session-start brief (~1k tokens at the
@@ -2263,7 +2310,7 @@ mod tests {
     use ai_memory_consolidate::{AutoImproveReviewConfig, run_auto_improve_review};
     use ai_memory_core::{SanitizeConfig, Sanitizer};
     use ai_memory_llm::{ChatRequest, ChatResponse, LlmProvider, LlmResult};
-    use ai_memory_store::Store;
+    use ai_memory_store::{FinishWorkstreamRun, PrepareWorkstreamRun, Store, WorkstreamSelection};
     use ai_memory_wiki::Wiki;
     use tempfile::TempDir;
 
@@ -5457,6 +5504,117 @@ mod tests {
             handoff_pos < brief_pos,
             "pending handoff must precede the brief"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_handoff_combines_portable_delta_and_project_brief() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        state
+            .writer
+            .upsert_page(brief_page(
+                state.workspace_id,
+                state.project_id,
+                "_rules/managed.md",
+                "managed briefing sentinel",
+                false,
+            ))
+            .await
+            .unwrap();
+
+        let first = state
+            .writer
+            .prepare_workstream_run(PrepareWorkstreamRun {
+                workspace_id: state.workspace_id,
+                project_id: state.project_id,
+                repo_fingerprint: "repo".into(),
+                worktree_fingerprint: "worktree".into(),
+                cwd: "/repo".into(),
+                agent: AgentKind::ClaudeCode,
+                automatic_harness: false,
+                available_agents: Vec::new(),
+                selection: WorkstreamSelection::Current,
+                lease_owner: "test-first".into(),
+            })
+            .await
+            .unwrap();
+        state
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: first.run_id,
+                native_session_id: Some("claude-session".into()),
+                source_cursor: None,
+                events: vec![ai_memory_core::NewWorkstreamEvent {
+                    event_id: "managed-event-1".into(),
+                    agent: AgentKind::ClaudeCode,
+                    native_session_id: "claude-session".into(),
+                    source_record_id: Some("record-1".into()),
+                    kind: WorkstreamEventKind::Message,
+                    role: Some("user".into()),
+                    content: "portable managed delta sentinel".into(),
+                    occurred_at: None,
+                    metadata: serde_json::json!({}),
+                }],
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let kimi = state
+            .writer
+            .prepare_workstream_run(PrepareWorkstreamRun {
+                workspace_id: state.workspace_id,
+                project_id: state.project_id,
+                repo_fingerprint: "repo".into(),
+                worktree_fingerprint: "worktree".into(),
+                cwd: "/repo".into(),
+                agent: AgentKind::KimiCode,
+                automatic_harness: false,
+                available_agents: Vec::new(),
+                selection: WorkstreamSelection::Current,
+                lease_owner: "test-kimi".into(),
+            })
+            .await
+            .unwrap();
+        let query = |briefing: Option<&str>| HandoffQuery {
+            agent: Some("kimi-code".into()),
+            cwd: Some("/repo".into()),
+            workspace: Some("default".into()),
+            project: Some("scratch".into()),
+            project_strategy: None,
+            briefing: briefing.map(str::to_owned),
+            briefing_budget: None,
+            managed_run: Some(kimi.run_id.to_string()),
+            session_id: Some("kimi-session".into()),
+        };
+
+        let rendered = fetch_and_accept_handoff(&state, query(Some("true")), None)
+            .await
+            .unwrap()
+            .expect("managed delta and brief must be injected");
+        let delta_pos = rendered.find("portable managed delta sentinel").unwrap();
+        let brief_pos = rendered.find("managed briefing sentinel").unwrap();
+        assert!(
+            delta_pos < brief_pos,
+            "managed delta must precede the project brief: {rendered}"
+        );
+
+        let rendered = fetch_and_accept_handoff(&state, query(None), None)
+            .await
+            .unwrap();
+        assert!(
+            rendered.is_none(),
+            "delivered managed context must not repeat without a new briefing request"
+        );
+
+        let rendered = fetch_and_accept_handoff(&state, query(Some("true")), None)
+            .await
+            .unwrap()
+            .expect("an explicit later briefing request must still render the project brief");
+        assert!(rendered.contains("managed briefing sentinel"));
+        assert!(!rendered.contains("portable managed delta sentinel"));
     }
 
     /// The brief renderer respects the char budget: an over-budget body is

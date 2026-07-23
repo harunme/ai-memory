@@ -34,12 +34,13 @@ const PREPARE_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const IMPORT_BATCH_EVENTS: usize = 400;
 const IMPORT_BATCH_BYTES: usize = 1024 * 1024;
 const ADOPTION_CANDIDATE_LIMIT: usize = 8;
-const AUTO_HARNESSES: [ManagedHarness; 5] = [
+const AUTO_HARNESSES: [ManagedHarness; 6] = [
     ManagedHarness::Claude,
     ManagedHarness::Codex,
     ManagedHarness::OpenCode,
     ManagedHarness::Pi,
     ManagedHarness::Crush,
+    ManagedHarness::Kimi,
 ];
 
 #[derive(Debug, Clone)]
@@ -500,7 +501,7 @@ fn filter_usable_auto_sessions(
 
 fn no_auto_session_error() -> anyhow::Error {
     anyhow!(
-        "no Claude Code, Codex, OpenCode, Pi, or Crush session was found for this directory; start one explicitly with `ai-memory run claude`, `ai-memory run codex`, `ai-memory run opencode`, `ai-memory run pi`, or `ai-memory run crush`"
+        "no Claude Code, Codex, OpenCode, Pi, Crush, or Kimi Code session was found for this directory; start one explicitly with `ai-memory run claude`, `ai-memory run codex`, `ai-memory run opencode`, `ai-memory run pi`, `ai-memory run crush`, or `ai-memory run kimi`"
     )
 }
 
@@ -980,6 +981,7 @@ const fn managed_harness(choice: RunHarnessChoice) -> ManagedHarness {
         RunHarnessChoice::Pi => ManagedHarness::Pi,
         RunHarnessChoice::Crush => ManagedHarness::Crush,
         RunHarnessChoice::Omp => ManagedHarness::Omp,
+        RunHarnessChoice::Kimi => ManagedHarness::Kimi,
     }
 }
 
@@ -990,6 +992,7 @@ const fn managed_harness_from_agent(agent: AgentKind) -> Option<ManagedHarness> 
         AgentKind::OpenCode => Some(ManagedHarness::OpenCode),
         AgentKind::Pi => Some(ManagedHarness::Pi),
         AgentKind::Crush => Some(ManagedHarness::Crush),
+        AgentKind::KimiCode => Some(ManagedHarness::Kimi),
         _ => None,
     }
 }

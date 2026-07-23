@@ -135,18 +135,20 @@ async fn prepare_run(
             | AgentKind::Pi
             | AgentKind::Crush
             | AgentKind::Omp
+            | AgentKind::KimiCode
     ) {
         return error(
             StatusCode::BAD_REQUEST,
             "managed run requires a supported command-line harness",
         );
     }
-    const AUTO_AGENTS: [AgentKind; 5] = [
+    const AUTO_AGENTS: [AgentKind; 6] = [
         AgentKind::ClaudeCode,
         AgentKind::Codex,
         AgentKind::OpenCode,
         AgentKind::Pi,
         AgentKind::Crush,
+        AgentKind::KimiCode,
     ];
     if request.automatic_harness
         && (!AUTO_AGENTS.contains(&request.agent)
@@ -826,6 +828,70 @@ mod tests {
             Some("claude-current")
         );
         assert!(!prepared.may_adopt_existing_session);
+    }
+
+    #[tokio::test]
+    async fn kimi_code_is_accepted_as_an_explicit_and_automatic_harness() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let state = test_state(&store, temp.path());
+
+        let explicit = prepare_run(
+            State(state.clone()),
+            None,
+            Json(PrepareManagedRunRequest {
+                workspace: "default".into(),
+                project: "managed".into(),
+                cwd: "/repo".into(),
+                repo_fingerprint: "repo".into(),
+                worktree_fingerprint: "worktree".into(),
+                agent: AgentKind::KimiCode,
+                automatic_harness: false,
+                available_agents: Vec::new(),
+                workstream: None,
+                new_workstream: None,
+                lease_owner: "explicit".into(),
+            }),
+        )
+        .await;
+        assert_eq!(explicit.status(), StatusCode::OK);
+        let body = to_bytes(explicit.into_body(), 64 * 1024).await.unwrap();
+        let prepared: PrepareManagedRunResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(prepared.resolved_agent, Some(AgentKind::KimiCode));
+        // Close the explicit run so the automatic prepare can take the lease.
+        store
+            .writer
+            .finish_workstream_run(FinishWorkstreamRun {
+                run_id: prepared.run_id,
+                native_session_id: Some("session_abc".into()),
+                source_cursor: None,
+                events: Vec::new(),
+                complete: true,
+                segment_path: None,
+                exit_code: Some(0),
+            })
+            .await
+            .unwrap();
+
+        let automatic = prepare_run(
+            State(state),
+            None,
+            Json(PrepareManagedRunRequest {
+                workspace: "default".into(),
+                project: "managed".into(),
+                cwd: "/repo".into(),
+                repo_fingerprint: "repo".into(),
+                worktree_fingerprint: "worktree".into(),
+                agent: AgentKind::KimiCode,
+                automatic_harness: true,
+                available_agents: vec![AgentKind::KimiCode, AgentKind::ClaudeCode],
+                workstream: None,
+                new_workstream: None,
+                lease_owner: "automatic".into(),
+            }),
+        )
+        .await;
+        assert_eq!(automatic.status(), StatusCode::OK);
     }
 
     #[tokio::test]

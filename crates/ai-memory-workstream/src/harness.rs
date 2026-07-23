@@ -22,6 +22,8 @@ pub enum ManagedHarness {
     Crush,
     /// Oh My Pi.
     Omp,
+    /// Moonshot AI Kimi Code.
+    Kimi,
 }
 
 impl ManagedHarness {
@@ -35,6 +37,7 @@ impl ManagedHarness {
             "pi" => Some(Self::Pi),
             "crush" => Some(Self::Crush),
             "omp" | "oh-my-pi" => Some(Self::Omp),
+            "kimi" | "kimi-code" => Some(Self::Kimi),
             _ => None,
         }
     }
@@ -49,6 +52,7 @@ impl ManagedHarness {
             Self::Pi => AgentKind::Pi,
             Self::Crush => AgentKind::Crush,
             Self::Omp => AgentKind::Omp,
+            Self::Kimi => AgentKind::KimiCode,
         }
     }
 
@@ -62,6 +66,7 @@ impl ManagedHarness {
             Self::Pi => "pi",
             Self::Crush => "crush",
             Self::Omp => "omp",
+            Self::Kimi => "kimi",
         }
     }
 
@@ -75,6 +80,7 @@ impl ManagedHarness {
             Self::Pi => "pi",
             Self::Crush => "crush",
             Self::Omp => "omp",
+            Self::Kimi => "kimi",
         }
     }
 }
@@ -192,6 +198,17 @@ pub fn build_launch_plan(
                     expected = Some(id.to_string());
                 }
             }
+            ManagedHarness::Kimi => {
+                // Kimi accepts no caller-chosen id for a fresh session, so
+                // only a linked resume injects a selector. `--session <id>`
+                // goes at the end: it is a commander option (position-free)
+                // and user arguments are never reordered. The fresh session is
+                // linked by the user-prompt hook or discovered post-exit.
+                if let Some(id) = linked_session_id {
+                    args.extend([OsString::from("--session"), OsString::from(id)]);
+                    expected = Some(id.to_string());
+                }
+            }
         }
     }
 
@@ -215,11 +232,19 @@ pub fn apply_yolo(harness: ManagedHarness, args: &mut Vec<OsString>) {
         ManagedHarness::Pi => Some("--approve"),
         ManagedHarness::Crush => Some("--yolo"),
         ManagedHarness::Omp => None,
+        ManagedHarness::Kimi => Some("--yolo"),
     };
-    if let Some(flag) = flag
-        && !has_flag(args, &[flag])
-    {
-        args.push(OsString::from(flag));
+    if let Some(flag) = flag {
+        // Kimi's `--yolo` has hidden aliases (`--yes`, `--auto-approve`) and
+        // conflicts with the distinct `--auto` mode, so any of those native
+        // spellings already satisfies the wrapper's dangerous-mode request.
+        let present: &[&str] = match harness {
+            ManagedHarness::Kimi => &["--yolo", "-y", "--yes", "--auto-approve", "--auto"],
+            _ => &[flag],
+        };
+        if !has_flag(args, present) {
+            args.push(OsString::from(flag));
+        }
     }
 }
 
@@ -239,6 +264,7 @@ fn noninteractive_invocation(harness: ManagedHarness, args: &[OsString]) -> bool
         ManagedHarness::OpenCode => first_arg_is(args, "run"),
         ManagedHarness::Crush => first_arg_is(args, "run"),
         ManagedHarness::Pi | ManagedHarness::Omp => has_flag(args, &["--print", "-p"]),
+        ManagedHarness::Kimi => has_flag(args, &["--prompt", "-p"]),
     }
 }
 
@@ -359,6 +385,22 @@ fn launch_mode(harness: ManagedHarness, args: &[OsString]) -> LaunchMode {
             "worktree",
         ]
         .as_slice(),
+        ManagedHarness::Kimi => [
+            "export",
+            "provider",
+            "acp",
+            "web",
+            "server",
+            "login",
+            "doctor",
+            "vis",
+            "migrate",
+            // `update` is an alias of `upgrade`; both must pass through.
+            "upgrade",
+            "update",
+            "__plugin_run_node",
+        ]
+        .as_slice(),
     };
     let first = args.first().and_then(|arg| arg.to_str());
     if first.is_some_and(|value| utility.contains(&value)) {
@@ -397,6 +439,21 @@ fn has_explicit_session_selector(harness: ManagedHarness, args: &[OsString]) -> 
         ),
         ManagedHarness::Crush => has_flag(args, &["--session", "-s", "--continue", "-C"]),
         ManagedHarness::Omp => has_flag(args, &["--resume", "-r", "--continue", "-c"]),
+        // `--resume`/`-r` is a hidden alias of `--session`; `-C` is a hidden
+        // alias of `--continue`. A bare `--session` opens the native picker,
+        // which still counts as an explicit user choice.
+        ManagedHarness::Kimi => has_flag(
+            args,
+            &[
+                "--session",
+                "-S",
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "-C",
+            ],
+        ),
     }
 }
 
@@ -419,6 +476,9 @@ fn explicit_session_id(harness: ManagedHarness, args: &[OsString]) -> Option<Str
         ManagedHarness::Pi => flag_value(args, &["--session", "--session-id"]),
         ManagedHarness::Crush => flag_value(args, &["--session", "-s"]),
         ManagedHarness::Omp => flag_value(args, &["--resume", "-r"]),
+        // A bare `--session`/`--resume` opens the picker: `flag_value`
+        // returns `None` when no value follows, as intended.
+        ManagedHarness::Kimi => flag_value(args, &["--session", "-S", "--resume", "-r"]),
     }
 }
 
@@ -498,6 +558,8 @@ fn environment_session_dir_with(
             .or_else(|| value("PI_CODING_AGENT_DIR").map(|dir| dir.join("sessions"))),
         ManagedHarness::Crush => None,
         ManagedHarness::Omp => value("PI_CODING_AGENT_DIR").map(|dir| dir.join("sessions")),
+        // Sessions live under `<KIMI_CODE_HOME>/sessions/<bucket>/<id>/`.
+        ManagedHarness::Kimi => value("KIMI_CODE_HOME").map(|dir| dir.join("sessions")),
     }
 }
 
@@ -731,6 +793,7 @@ mod tests {
             (ManagedHarness::Pi, Some("--approve")),
             (ManagedHarness::Crush, Some("--yolo")),
             (ManagedHarness::Omp, None),
+            (ManagedHarness::Kimi, Some("--yolo")),
         ] {
             let mut args = Vec::new();
             apply_yolo(harness, &mut args);
@@ -825,5 +888,127 @@ mod tests {
         .unwrap();
         assert_eq!(plan.mode, LaunchMode::Passthrough);
         assert_eq!(strings(&plan.args), ["doctor"]);
+    }
+
+    #[test]
+    fn kimi_fresh_launch_injects_no_session_selector() {
+        // Kimi rejects caller-chosen ids for new sessions, so a fresh launch
+        // must leave argv untouched even though the harness is managed.
+        let plan = build_launch_plan(
+            ManagedHarness::Kimi,
+            None,
+            vec![OsString::from("continue here")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(strings(&plan.args), ["continue here"]);
+        assert_eq!(plan.expected_session_id, None);
+        assert_eq!(plan.mode, LaunchMode::Session);
+    }
+
+    #[test]
+    fn kimi_resume_appends_session_selector_after_user_arguments() {
+        let plan = build_launch_plan(
+            ManagedHarness::Kimi,
+            None,
+            vec![OsString::from("--model"), OsString::from("k2")],
+            Some("session_abc"),
+        )
+        .unwrap();
+        assert_eq!(
+            strings(&plan.args),
+            ["--model", "k2", "--session", "session_abc"]
+        );
+        assert_eq!(plan.expected_session_id.as_deref(), Some("session_abc"));
+    }
+
+    #[test]
+    fn kimi_explicit_selector_always_wins_including_bare_picker() {
+        for native in [
+            vec![
+                OsString::from("--session"),
+                OsString::from("session_chosen"),
+            ],
+            vec![OsString::from("--resume=session_chosen")],
+            vec![OsString::from("-c")],
+            // Bare `--session` opens the native picker; it is still an
+            // explicit user choice, so nothing may be injected and no id is
+            // known up front.
+            vec![OsString::from("--session")],
+        ] {
+            let plan = build_launch_plan(
+                ManagedHarness::Kimi,
+                None,
+                native.clone(),
+                Some("session_linked"),
+            )
+            .unwrap();
+            assert_eq!(plan.args, native, "{native:?} must stay byte-identical");
+            assert_ne!(plan.expected_session_id.as_deref(), Some("session_linked"));
+        }
+        let chosen = build_launch_plan(
+            ManagedHarness::Kimi,
+            None,
+            vec![
+                OsString::from("--session"),
+                OsString::from("session_chosen"),
+            ],
+            Some("session_linked"),
+        )
+        .unwrap();
+        assert_eq!(
+            chosen.expected_session_id.as_deref(),
+            Some("session_chosen")
+        );
+    }
+
+    #[test]
+    fn kimi_utility_subcommands_are_passed_through() {
+        for utility in ["export", "doctor", "provider", "upgrade", "server"] {
+            let plan = build_launch_plan(
+                ManagedHarness::Kimi,
+                None,
+                vec![OsString::from(utility)],
+                Some("session_linked"),
+            )
+            .unwrap();
+            assert_eq!(plan.mode, LaunchMode::Passthrough, "{utility}");
+            assert_eq!(strings(&plan.args), [utility]);
+        }
+    }
+
+    #[test]
+    fn kimi_noninteractive_prompt_blocks_adoption() {
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Kimi,
+            &[OsString::from("-p"), OsString::from("summarize")]
+        ));
+        assert!(!allows_native_session_adoption(
+            ManagedHarness::Kimi,
+            &[OsString::from("--prompt"), OsString::from("summarize")]
+        ));
+        assert!(allows_native_session_adoption(
+            ManagedHarness::Kimi,
+            &[OsString::from("--model"), OsString::from("k2")]
+        ));
+    }
+
+    #[test]
+    fn kimi_yolo_respects_native_aliases_and_auto_conflict() {
+        for already in ["--yolo", "-y", "--yes", "--auto-approve", "--auto"] {
+            let mut args = vec![OsString::from(already)];
+            apply_yolo(ManagedHarness::Kimi, &mut args);
+            assert_eq!(strings(&args), [already], "{already} must not duplicate");
+        }
+    }
+
+    #[test]
+    fn kimi_home_environment_override_points_at_sessions_root() {
+        let get =
+            |name: &str| (name == "KIMI_CODE_HOME").then(|| OsString::from("/stores/kimi-code"));
+        assert_eq!(
+            environment_session_dir_with(ManagedHarness::Kimi, get).as_deref(),
+            Some(std::path::Path::new("/stores/kimi-code/sessions"))
+        );
     }
 }
