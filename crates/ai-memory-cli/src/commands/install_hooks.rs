@@ -433,7 +433,7 @@ fn apply_base_path_to_hook_url(url: &str, base_path: &str) -> String {
     if !existing_path.is_empty() {
         return url.to_string();
     }
-    let prefix = crate::commands::serve::normalize_prefix(base_path);
+    let prefix = ai_memory_web::normalize_prefix(base_path);
     if prefix.is_empty() {
         origin
     } else {

@@ -2324,11 +2324,17 @@ async fn consolidate_or_synth(
             "{}: LLM consolidation written",
             checkpoint_label
         );
-        let _ = state.wiki.commit_all(&format!(
-            "{}(session {}): checkpoint",
-            checkpoint_label,
-            short_id(&session_id.to_string()),
-        ));
+        let _ = state
+            .wiki
+            .commit_all(&format!(
+                "{}(session {}): checkpoint",
+                checkpoint_label,
+                short_id(&session_id.to_string()),
+            ))
+            .map_err(|e| {
+                tracing::warn!(error = %e, "{}: checkpoint auto-commit failed", checkpoint_label);
+                e
+            });
         return Ok(());
     }
     let observations = state.reader.observations_for_session(session_id).await?;
@@ -2352,11 +2358,17 @@ async fn consolidate_or_synth(
             actor: ai_memory_core::ActorContext::anonymous(),
         })
         .await?;
-    let _ = state.wiki.commit_all(&format!(
-        "{}(session {}): checkpoint",
-        checkpoint_label,
-        short_id(&session_id.to_string()),
-    ));
+    let _ = state
+        .wiki
+        .commit_all(&format!(
+            "{}(session {}): checkpoint",
+            checkpoint_label,
+            short_id(&session_id.to_string()),
+        ))
+        .map_err(|e| {
+            tracing::warn!(error = %e, "{}: checkpoint auto-commit failed", checkpoint_label);
+            e
+        });
     debug!(session = %session_id, "{}: rule-based checkpoint written", checkpoint_label);
     Ok(())
 }

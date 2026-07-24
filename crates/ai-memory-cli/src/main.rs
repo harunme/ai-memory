@@ -13,7 +13,6 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
-mod auth;
 mod auth_bearer;
 mod cli;
 mod commands;

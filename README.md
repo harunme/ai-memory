@@ -121,12 +121,13 @@ priors are at the [bottom](#influences-and-prior-art).
 - **Thin-client CLI.** `ai-memory status`, `bootstrap`, `checkpoints`,
   `restore-page`, `purge-project`, `rename-project`, `move-project`,
   `audit-contamination`, `lint`, `curator`, `auto-improve`,
-  `auto-improve-report`, `pending-writes`, `embed`, `forget-sweep`, `backup` are
+  `auto-improve-report`, `pending-writes`, `embed`, `forget-sweep`, `backup`,
+  `finalize-session` are
   all HTTP clients of the running server - never touch SQLite or
   wiki files directly. `status` also reports passive LLM/embedding
   provider health from the last real provider call. Server is the
-  single source of truth. `finalize-session` is the exception: it reads the
-  local SQLite index only to find matching open sessions, then posts synthetic
+  single source of truth. `finalize-session` lists matching open
+  sessions through `GET /admin/open-sessions`, then posts synthetic
   `session-end` hooks back to the server.
 - **LLM is opt-in.** Zero-LLM mode still gives you FTS5 search +
   rule-based summarisation. Add a provider when you want consolidated

@@ -1653,11 +1653,10 @@ impl ReaderPool {
                 let model: String = row.get(1)?;
                 let dim: i64 = row.get(2)?;
                 let count: i64 = row.get(3)?;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 Ok((
                     provider,
                     model,
-                    dim as u32,
+                    u32::try_from(dim).unwrap_or(0),
                     u64::try_from(count).unwrap_or(0),
                 ))
             })?;
@@ -3060,11 +3059,10 @@ impl ReaderPool {
                 let last_updated = last_updated_us
                     .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
                     .map(|ts| ts.to_string());
-                #[allow(clippy::cast_sign_loss)]
                 out.push(ProjectSummary {
                     workspace_name,
                     project_name,
-                    page_count: page_count.max(0) as u64,
+                    page_count: u64::try_from(page_count).unwrap_or(0),
                     last_updated,
                 });
             }
@@ -3215,11 +3213,10 @@ impl ReaderPool {
                 let last_updated = last_updated_us
                     .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
                     .map(|ts| ts.to_string());
-                #[allow(clippy::cast_sign_loss)]
                 out.push(WorkspaceSummary {
                     workspace_name,
-                    project_count: project_count.max(0) as u64,
-                    page_count: page_count.max(0) as u64,
+                    project_count: u64::try_from(project_count).unwrap_or(0),
+                    page_count: u64::try_from(page_count).unwrap_or(0),
                     last_updated,
                 });
             }
@@ -4412,8 +4409,7 @@ fn materialise_observation(
         source_event,
         title,
         body,
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        importance: importance.clamp(1, 10) as u8,
+        importance: u8::try_from(importance.clamp(1, 10)).unwrap_or(1),
         created_at: jiff::Timestamp::from_microsecond(created_us).map_err(|e| {
             StoreError::Memory(ai_memory_core::MemoryError::MalformedRecord(format!(
                 "bad timestamp: {e}"

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `GET /admin/open-sessions` lists open (not yet ended) sessions for one
+  workspace/project/agent, newest first (`all=true` returns every match).
+  `ai-memory finalize-session` now uses this endpoint instead of opening
+  the local SQLite index directly, so every CLI command is a thin HTTP
+  client of the running server; the command now requires a reachable
+  server and no longer works against an offline data directory.
+
 ## [1.18.0] - 2026-07-23
 
 ### Added
