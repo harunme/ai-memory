@@ -1595,3 +1595,229 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
     }
     tracing::debug!("writer thread exiting cleanly");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+    use ai_memory_core::{NewPage, PagePath, Tier};
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn sample_page(ws: WorkspaceId, proj: ProjectId, path: &str, body: &str) -> NewPage {
+        NewPage {
+            workspace_id: ws,
+            project_id: proj,
+            path: PagePath::new(path).unwrap(),
+            title: "test".into(),
+            body: body.into(),
+            tier: Tier::Semantic,
+            frontmatter_json: serde_json::json!({}),
+            pinned: false,
+            links: Vec::new(),
+            author_id: None,
+        }
+    }
+
+    /// Enqueue a workspace creation without awaiting the reply, returning
+    /// the oneshot receiver so the caller decides when to collect it.
+    async fn enqueue_workspace(
+        writer: &WriterHandle,
+        name: &str,
+    ) -> oneshot::Receiver<StoreResult<WorkspaceId>> {
+        let (tx, rx) = oneshot::channel();
+        writer
+            .inner
+            .tx
+            .send(WriteCmd::GetOrCreateWorkspace {
+                name: name.to_owned(),
+                reply: tx,
+            })
+            .await
+            .expect("writer channel closed while enqueueing");
+        rx
+    }
+
+    /// Commands enqueued on the bounded channel run on the writer thread in
+    /// FIFO order: insertion rowids must match enqueue order exactly.
+    #[tokio::test]
+    async fn executes_commands_in_fifo_order() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+
+        let mut pending = Vec::new();
+        for i in 0..8 {
+            pending.push(enqueue_workspace(&store.writer, &format!("fifo-{i:02}")).await);
+        }
+        for rx in pending {
+            rx.await.unwrap().unwrap();
+        }
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM workspaces WHERE name LIKE 'fifo-%' ORDER BY rowid")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected: Vec<String> = (0..8).map(|i| format!("fifo-{i:02}")).collect();
+        assert_eq!(
+            names, expected,
+            "single writer thread must apply commands in enqueue order"
+        );
+    }
+
+    /// A command whose SQL fails returns the error on *its* oneshot only;
+    /// the actor keeps processing — the next command succeeds.
+    #[tokio::test]
+    async fn sql_error_reaches_caller_without_killing_actor() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "app", None)
+            .await
+            .unwrap();
+
+        // FK violation: no project row exists for this id.
+        let err = store
+            .writer
+            .upsert_page(sample_page(ws, ProjectId::new(), "notes/bogus.md", "x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Sqlite(_)),
+            "expected the raw SQL failure to reach the caller, got {err:?}"
+        );
+
+        // The actor survived: a well-formed write lands afterwards.
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "notes/fine.md", "ok"))
+            .await
+            .unwrap();
+        let conn = Connection::open(store.db_path()).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only the post-error write may be present");
+    }
+
+    /// A batch command is one transaction: a failure part-way through rolls
+    /// back the pages that already succeeded inside the same batch.
+    #[tokio::test]
+    async fn batch_upsert_rolls_back_on_mid_batch_failure() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "app", None)
+            .await
+            .unwrap();
+
+        let pages = vec![
+            sample_page(ws, proj, "notes/good.md", "good"),
+            // Second page references a project that does not exist.
+            sample_page(ws, ProjectId::new(), "notes/bad.md", "bad"),
+        ];
+        let err = store.writer.upsert_pages_batch(pages).await.unwrap_err();
+        assert!(
+            matches!(err, StoreError::Sqlite(_)),
+            "expected FK failure from the batch, got {err:?}"
+        );
+
+        let conn = Connection::open(store.db_path()).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "mid-batch failure must roll back the earlier page too"
+        );
+
+        // Actor is still alive after the rolled-back batch.
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "notes/after.md", "after"))
+            .await
+            .unwrap();
+    }
+
+    /// Dropping the last handle queues `Shutdown` behind the pending
+    /// commands and joins the thread: every already-enqueued command is
+    /// answered, and the join returning proves the thread exited (no hang).
+    #[tokio::test]
+    async fn drop_completes_pending_commands_and_joins_thread() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let writer = store.writer.clone();
+        let db_path = store.db_path().to_owned();
+        drop(store);
+
+        let mut pending = Vec::new();
+        for i in 0..8 {
+            pending.push(enqueue_workspace(&writer, &format!("drain-{i:02}")).await);
+        }
+        // Joins the writer thread inside `Drop for WriterInner`; returns
+        // only after the queue (including Shutdown) was drained.
+        drop(writer);
+
+        for rx in pending {
+            let id = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .expect("pending command was not answered before the writer stopped")
+                .expect("reply oneshot dropped")
+                .unwrap();
+            let conn = Connection::open(&db_path).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspaces WHERE id = ?1",
+                    [id.as_bytes()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "pending command must have committed");
+        }
+    }
+
+    /// Once the actor has stopped, calls fail fast with
+    /// [`StoreError::WriterClosed`] instead of hanging on a dead channel.
+    #[tokio::test]
+    async fn commands_after_shutdown_return_writer_closed() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let writer = store.writer.clone();
+        drop(store);
+
+        writer
+            .inner
+            .tx
+            .send(WriteCmd::Shutdown)
+            .await
+            .expect("writer channel closed before Shutdown");
+
+        // FIFO guarantees Shutdown is processed first; whether the send
+        // itself fails or the reply oneshot is dropped, the caller sees
+        // WriterClosed either way.
+        let err = writer
+            .get_or_create_workspace("too-late")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StoreError::WriterClosed),
+            "expected WriterClosed, got {err:?}"
+        );
+    }
+}

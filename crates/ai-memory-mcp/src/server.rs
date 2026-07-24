@@ -1075,27 +1075,10 @@ impl AiMemoryServer {
     /// Attach an LLM-backed consolidator. Without this, the
     /// `memory_consolidate` tool errors with "not configured". Also
     /// stores the LLM provider so `memory_lint` can run its
-    /// contradiction pass.
-    #[must_use]
-    pub fn with_consolidator(mut self, wiki: Wiki, llm: Arc<dyn LlmProvider>) -> Self {
-        let consolidator = Consolidator::new(
-            self.reader.clone(),
-            self.writer.clone(),
-            wiki.clone(),
-            llm.clone(),
-            self.workspace_id,
-            self.project_id,
-        );
-        self.consolidator = Some(Arc::new(consolidator));
-        self.llm = Some(llm);
-        self.wiki = Some(wiki);
-        self
-    }
-
-    /// Variant of [`Self::with_consolidator`] that accepts a pre-built
-    /// `Arc<Consolidator>`. Used when the same consolidator must be
-    /// shared with another subsystem (e.g. the hook router's
-    /// PreCompact branch) so both paths see the same handle.
+    /// contradiction pass. Accepts a pre-built `Arc<Consolidator>` so
+    /// the same consolidator can be shared with another subsystem
+    /// (e.g. the hook router's PreCompact branch) and both paths see
+    /// the same handle.
     #[must_use]
     pub fn with_consolidator_arc(
         mut self,

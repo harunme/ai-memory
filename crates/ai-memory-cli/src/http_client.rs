@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::commands::serve::normalize_prefix;
 use crate::config::{Config, DEFAULT_SERVER_URL};
+use ai_memory_web::normalize_prefix;
 
 /// Non-success response returned by the configured ai-memory server.
 #[derive(Debug)]
@@ -656,9 +656,11 @@ mod tests {
             access: secrecy::SecretString::from("oidc-access".to_string()),
             refresh: secrecy::SecretString::from("refresh-token".to_string()),
             expires_at_ms: u64::MAX,
-            issuer: "https://issuer.example.com/realms/team".to_string(),
-            client_id: "ai-memory-cli".to_string(),
-            token_endpoint: "https://issuer.example.com/token".to_string(),
+            extra: ai_memory_llm::OidcExtras {
+                issuer: "https://issuer.example.com/realms/team".to_string(),
+                client_id: "ai-memory-cli".to_string(),
+                token_endpoint: "https://issuer.example.com/token".to_string(),
+            },
         }
         .save(&config.oidc_device_token_path())
         .expect("save test OIDC token");
